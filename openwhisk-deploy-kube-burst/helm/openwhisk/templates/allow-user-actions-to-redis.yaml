@@ -1,0 +1,24 @@
+{{- if and .Values.invoker.containerFactory.kubernetes.isolateUserActions .Values.invoker.containerFactory.kubernetes.allowUserActionsToRedis }}
+
+# Allow user action pods to reach the release-local Redis instance used by Burst middleware.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-actions-allow-redis-np
+  labels:
+{{ include "openwhisk.label_boilerplate" .| indent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      name: {{ .Release.Name }}-redis
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - podSelector:
+        matchExpressions:
+          - {key: user-action-pod, operator: In, values: ["true"]}
+    ports:
+    - protocol: TCP
+      port: {{ .Values.redis.port }}
+{{- end }}

@@ -1,0 +1,22 @@
+[package]
+name = "actions"
+version = "0.1.0"
+publish = false
+edition = "2021"
+resolver = "2"
+
+[dependencies]
+burst-communication-middleware = { path = "../burst-communication-middleware", features = ["redis"] }
+bytes = "1.5.0"
+serde = "1.0"
+serde_derive = "1.0"
+serde_json = "1.0"
+anyhow = "1.0"
+tokio = { version = "1.45.0", features = ["full"] }
+aws-sdk-s3 = { version = "1.84.0", features = ["behavior-version-latest"] }
+aws-config = { version = "1.6.2", features = ["behavior-version-latest"] }
+aws-credential-types = { version = "1.2.3", features = ["hardcoded-credentials"] }
+
+[lib]
+name = "actions"
+path = "src/lib.rs"

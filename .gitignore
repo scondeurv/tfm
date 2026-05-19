@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Rust
+target/
+
+# Build and package artifacts
+*.tar
+*.tar.gz
+*.tgz
+*.whl
+*.egg-info/
+dist/
+build/
+
+# Generated benchmark data and results
+*.tsv
+*.csv
+*.jsonl
+results/
+campaign-*/
+snapshots/
+
+# Local configuration and credentials
+.env
+.env.*
+*.local
+*.pem
+*.key
+kubeconfig*
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*.swo
+.DS_Store
+
+# IDEs
+.idea/
+.vscode/

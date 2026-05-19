@@ -1,0 +1,42 @@
+whisk:
+  middleware:
+    rabbitmq: "amqp://guest:guest@rabbitmq.default.svc.cluster.local:5672"
+    redisList: "redis://dragonfly.default.svc.cluster.local:6379"
+    redisStream: "redis://dragonfly.default.svc.cluster.local:6379"
+  containerPool:
+    userMemory: "55000m"
+  ingress:
+     type: NodePort
+     apiHostName: 192.168.1.188
+     apiHostPort: 31001
+     useInternally: false
+  versions:
+    openwhisk:
+      gitTag: "72bb2a1"
+controller:
+  imageName: "manriurv/controller"
+  imageTag: "classic"  
+invoker:
+  imageName: "manriurv/invoker"
+  imageTag: "classic"
+  containerFactory:
+    impl: "kubernetes"
+benchmark:
+  workerPolicy:
+    workers: 4
+    cpuPerWorker: "1"
+    systemReservedCpu: "6"
+  actionPodCpu:
+    enabled: true
+    request: "1000m"
+    limit: "1000m"
+nginx:
+  httpsNodePort: 31001
+installPackages:
+  enabled: false
+zookeeper:
+  port: 2181
+k8s:
+  persistence:
+    enabled: true
+    hasDefaultStorageClass: true

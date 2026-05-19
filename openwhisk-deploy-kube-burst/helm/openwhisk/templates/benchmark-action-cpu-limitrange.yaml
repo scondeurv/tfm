@@ -1,0 +1,20 @@
+{{- if and .Values.benchmark.actionPodCpu.enabled (eq .Values.invoker.containerFactory.impl "kubernetes") }}
+#
+# Namespace-level CPU defaults used to keep benchmarked action workers aligned
+# with the Spark baseline: 1 CPU per worker/action pod.
+#
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: {{ .Release.Name }}-benchmark-action-cpu
+  labels:
+    name: {{ .Release.Name }}-benchmark-action-cpu
+{{ include "openwhisk.label_boilerplate" . | indent 4 }}
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: {{ .Values.benchmark.actionPodCpu.request | quote }}
+      default:
+        cpu: {{ .Values.benchmark.actionPodCpu.limit | quote }}
+{{- end }}

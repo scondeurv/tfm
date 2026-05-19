@@ -1,0 +1,7 @@
+[project]
+name = "bfs"
+version = "0.1.0"
+description = "Distributed BFS benchmark using Burst Communication Middleware on OpenWhisk"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []

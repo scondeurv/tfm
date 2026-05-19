@@ -1,0 +1,43 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+uv.lock
+
+# Rust build artifacts
+target/
+bfs-standalone/target/
+ow-bfs/target/
+
+# OpenWhisk action bundle
+bfs.zip
+
+# Compiled OpenWhisk binary
+ow-bfs/bin/exec
+
+# Graph data files (large, generated)
+large_bfs_*.txt
+
+# Benchmark results and logs
+*.log
+crossover_bfs_results.json
+crossover_bfs_data.json
+bfs-burst.json
+bfs-standalone.json
+
+# Plots
+*.png
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+.idea/
+.vscode/
