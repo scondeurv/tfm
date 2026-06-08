@@ -1,0 +1,47 @@
+services:
+  spark-master:
+    image: ${SPARK_IMAGE:-spark:3.5.7-scala2.12-java17-ubuntu}
+    container_name: spark-master
+    hostname: spark-master
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.master.Master
+      - --host
+      - spark-master
+      - --port
+      - "7077"
+      - --webui-port
+      - "8080"
+    ports:
+      - "7077:7077"
+      - "8080:8080"
+    volumes:
+      - .:/opt/tfm-spark
+    cpus: ${SPARK_MASTER_CPUS:-1.0}
+    mem_limit: ${SPARK_MASTER_MEMORY:-1g}
+    networks:
+      - spark-net
+
+  spark-worker:
+    image: ${SPARK_IMAGE:-spark:3.5.7-scala2.12-java17-ubuntu}
+    hostname: spark-worker
+    depends_on:
+      - spark-master
+    command:
+      - /opt/spark/bin/spark-class
+      - org.apache.spark.deploy.worker.Worker
+      - spark://spark-master:7077
+      - --cores
+      - "${SPARK_WORKER_CORES:-1}"
+      - --memory
+      - "${SPARK_WORKER_MEMORY:-4g}"
+    volumes:
+      - .:/opt/tfm-spark
+    cpus: ${SPARK_WORKER_CPUS_LIMIT:-1.0}
+    mem_limit: ${SPARK_WORKER_MEMORY_LIMIT:-4g}
+    networks:
+      - spark-net
+
+networks:
+  spark-net:
+    driver: bridge

@@ -14,7 +14,6 @@ campaign source zip.
 - `BFS`
 - `SSSP`
 - `Label Propagation`
-- `WCC` / `Union-Find`
 
 ## Commands
 
@@ -50,9 +49,9 @@ distributed in-process tests, run from the package root:
 ./run_algorithm_correctness_tests.sh
 ```
 
-This uses `cargo test --offline` for `bfs/ow-bfs`, `sssp/ow-sssp`,
-`labelpropagation/ow-lp`, and `wcc/ow-uf`. It does not run as part of the
-campaign measurement path.
+This uses `cargo test --offline` for `bfs/ow-bfs`, `sssp/ow-sssp`, and
+`labelpropagation/ow-lp`. It does not run as part of the campaign measurement
+path.
 
 ## Fixtures
 

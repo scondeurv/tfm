@@ -1,0 +1,24 @@
+[package]
+name = "pagerank-mpi"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pagerank-core = { path = "../pagerank-core" }
+# rsmpi 0.8 supports OpenMPI 4.x (CloudLab Ubuntu 22.04: 4.1.5).
+# Does NOT compile against OpenMPI 5.x (struct layout changed for MPI_Status).
+mpi = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lib]
+name = "pagerank_mpi"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pagerank-mpi"
+path = "src/main.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -196,7 +196,7 @@ def estimate_logical_traffic_bytes(
             "broadcast_bytes": 0,
             "total_bytes": 0,
         }
-    if iterations <= 0 and algorithm != "wcc":
+    if iterations <= 0:
         return {
             "reduce_bytes": 0,
             "broadcast_bytes": 0,
@@ -231,63 +231,14 @@ def estimate_logical_traffic_bytes(
             "total_bytes": 2 * per_round * iterations,
         }
 
-    if algorithm == "wcc":
-        rounds = max(1, iterations)
+    if algorithm == "pagerank":
+        # ContribMessage layout: n f32 slots + 1 counter slot = (n+1) * 4 bytes
         message_bytes = (num_nodes + 1) * 4
         per_round = (workers - 1) * message_bytes
         return {
-            "reduce_bytes": per_round * rounds,
-            "broadcast_bytes": per_round * rounds,
-            "total_bytes": 2 * per_round * rounds,
+            "reduce_bytes": per_round * iterations,
+            "broadcast_bytes": per_round * iterations,
+            "total_bytes": 2 * per_round * iterations,
         }
 
     return None
-
-
-def estimate_wcc_phase_metrics(
-    timing_details: dict[str, Any] | None,
-    *,
-    workers: int,
-    host_total_ms: int | None = None,
-) -> dict[str, Any] | None:
-    if not timing_details:
-        return None
-
-    cold_start_ms = int(timing_details.get("cold_start_ms") or 0)
-    stagger_ms = int(timing_details.get("stagger_ms") or 0)
-    warm_total_ms = int(timing_details.get("warm_total_ms") or 0)
-    # computation_ms = local_uf_start → global_merge_end (pure compute, excluding S3 load)
-    compute_ms = int(timing_details.get("computation_ms") or 0)
-    # load_ms is only reported when the action has separate S3 timestamps.
-    # Otherwise the non-compute part of the warm span is treated as communication.
-    raw_load_ms = timing_details.get("load_ms")
-    load_ms = int(raw_load_ms) if raw_load_ms is not None else 0
-    derived_host_total = int(timing_details.get("total_ms") or 0)
-    host_total_ms = int(host_total_ms if host_total_ms is not None else derived_host_total)
-    communication_ms = max(0, warm_total_ms - load_ms - compute_ms)
-
-    return {
-        "workers": workers,
-        "cold_start_ms": cold_start_ms,
-        "stagger_ms": stagger_ms,
-        "load_ms": load_ms,
-        "compute_ms": compute_ms,
-        "reduce_ms": communication_ms,
-        "broadcast_ms": 0,
-        "communication_ms": communication_ms,
-        "warm_total_ms": warm_total_ms,
-        "host_total_ms": host_total_ms,
-        "span_ms": compute_ms,
-        "write_ms": None,
-        "iterations": 1,
-        "per_iteration": [
-            {
-                "iteration": 0,
-                "compute_ms": compute_ms,
-                "reduce_ms": communication_ms,
-                "broadcast_ms": 0,
-            }
-        ],
-        "estimated": True,
-        "estimation_basis": "wcc_timing_details",
-    }

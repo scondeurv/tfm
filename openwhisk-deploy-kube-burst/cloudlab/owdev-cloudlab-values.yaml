@@ -1,0 +1,66 @@
+whisk:
+  ingress:
+    type: Standard
+    apiHostName: localhost
+    apiHostPort: 31001
+    apiHostProto: http
+    useInternally: false
+    domain: openwhisk.local
+  testing:
+    includeTests: false
+    includeSystemTests: false
+  versions:
+    openwhisk:
+      gitTag: "72bb2a1"
+  containerPool:
+    userMemory: "30000m"
+  limits:
+    actions:
+      time:
+        min: "100ms"
+        max: "30m"
+        std: "1m"
+
+controller:
+  imageName: "manriurv/controller"
+  imageTag: "latest"
+  imagePullPolicy: Always
+
+invoker:
+  imageName: "manriurv/invoker"
+  imageTag: "latest"
+  imagePullPolicy: Always
+  jvmHeapMB: "4096"
+  containerFactory:
+    impl: "kubernetes"
+    kubernetes:
+      allowUserActionsToRedis: true
+      replicaCount: 2
+
+benchmark:
+  workerPolicy:
+    workers: 2
+    cpuPerWorker: "1"
+    systemReservedCpu: "2"
+  actionPodCpu:
+    enabled: true
+    request: "1000m"
+    limit: "1000m"
+
+installPackages:
+  enabled: false
+
+probes:
+  controller:
+    livenessProbe:
+      initialDelaySeconds: 60
+      periodSeconds: 15
+      timeoutSeconds: 5
+    readinessProbe:
+      initialDelaySeconds: 60
+      periodSeconds: 15
+      timeoutSeconds: 5
+
+k8s:
+  persistence:
+    enabled: false

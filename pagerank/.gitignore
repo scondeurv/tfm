@@ -1,0 +1,32 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+uv.lock
+
+# Rust build artifacts
+target/
+pagerank-core/target/
+pagerank-standalone/target/
+pagerank-rayon/target/
+pagerank-mpi/target/
+ow-pagerank/target/
+
+# OpenWhisk action bundle binary
+pagerank.zip
+ow-pagerank/bin/exec
+ow-pagerank/exec_cluster
+
+# Local sym/copy of middleware (cluster build helper)
+burst-communication-middleware
+
+# Synthetic datasets
+large_pagerank_*.txt
+large_pagerank_*.txt.gz

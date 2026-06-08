@@ -1,0 +1,24 @@
+[package]
+name = "lp-mpi"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+label-propagation = { path = "../lpst" }
+# rsmpi 0.8 supports OpenMPI 4.x (CloudLab Ubuntu 22.04: 4.1.2). Does NOT
+# compile against OpenMPI 5.x (struct layout changed for MPI_Status).
+mpi = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lib]
+name = "lp_mpi"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lp-mpi"
+path = "src/main.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

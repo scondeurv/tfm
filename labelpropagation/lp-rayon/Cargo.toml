@@ -1,0 +1,22 @@
+[package]
+name = "lp-rayon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+label-propagation = { path = "../lpst" }
+rayon = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lib]
+name = "lp_rayon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lp-rayon"
+path = "src/main.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

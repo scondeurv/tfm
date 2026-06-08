@@ -6,8 +6,13 @@ import warnings
 import logging
 
 import requests
+from requests.adapters import HTTPAdapter
 from typing import List
 from urllib3.exceptions import InsecureRequestWarning
+try:
+    from urllib3.util.retry import Retry
+except Exception:  # pragma: no cover - very old urllib3
+    Retry = None
 from ow_client.logger import logger
 
 from ow_client import utils
@@ -26,10 +31,36 @@ class OpenwhiskExecutor:
         self.session.verify = False
         self.session.headers.update({"Authorization": f"Basic {AUTH_TOKEN}", "Content-Type": "application/json"})
         self.session.verify = False
+        # Retry only on *connection establishment* failures (read=False), so a
+        # transient "Connection reset/refused" before the request is sent is
+        # absorbed here instead of failing the whole campaign cell. We never
+        # retry after the request reached the server, to avoid double-invoking
+        # a burst.
+        if Retry is not None:
+            retry = Retry(total=3, connect=3, read=False, redirect=False,
+                          status=0, backoff_factor=0.5)
+            adapter = HTTPAdapter(max_retries=retry)
+            self.session.mount("http://", adapter)
+            self.session.mount("https://", adapter)
         warnings.filterwarnings('ignore', category=InsecureRequestWarning)
         self.__monitor_interval = 2  # seconds
         logger.setLevel(logging.DEBUG if debug else logging.INFO)
         logger.info("OpenwhiskExecutor initialized")
+
+    def close(self):
+        """Close the underlying HTTP session (connection pool). Safe to call
+        multiple times; never raises."""
+        try:
+            self.session.close()
+        except Exception:  # pragma: no cover - best-effort cleanup
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False
 
     def burst(self, action_name, params_list, file, is_zip=False, memory=256, debug_mode=False, custom_image=None,
               backend="rabbitmq",

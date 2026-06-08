@@ -1,0 +1,22 @@
+[package]
+name = "sssp-rayon"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sssp-standalone = { path = "../sssp-standalone" }
+rayon = "1.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[lib]
+name = "sssp_rayon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "sssp-rayon"
+path = "src/main.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

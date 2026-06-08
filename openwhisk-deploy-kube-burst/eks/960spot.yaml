@@ -1,0 +1,44 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: 960-spot-cluster
+  region: us-east-1 # north virginia
+  version: "1.23"
+
+nodeGroups:
+  - name: core
+    #instanceType: a1.xlarge
+    labels: { openwhisk-role: core }
+    desiredCapacity: 1
+    minSize: 1
+    maxSize: 1
+    instanceSelector:
+      vCPUs: 4
+      memory: 8GiB
+      cpuArchitecture: x86_64
+  - name: invokers
+    #instanceType: a1.xlarge # 4 cpu - 8GB
+    labels: { openwhisk-role: invoker }
+    amiFamily: AmazonLinux2
+    ami: ami-05cca29d4609d8ec1
+    desiredCapacity: 20
+    minSize: 20
+    maxSize: 20
+    ssh:
+      allow: true
+    instancesDistribution:
+      instanceTypes: ["c6g.12xlarge", "c7g.12xlarge", "c6a.12xlarge", "c6gd.12xlarge", "c5a.12xlarge", "c5.12xlarge", "c6i.12xlarge", "c5ad.12xlarge", "c6gn.12xlarge", "c7i.12xlarge", "c7gd.12xlarge", "c5d.12xlarge", "c6id.12xlarge", "c7a.12xlarge", "c6in.12xlarge", "c7gn.12xlarge"]
+      onDemandBaseCapacity: 0
+      onDemandPercentageAboveBaseCapacity: 0
+    overrideBootstrapCommand: |
+      #!/bin/bash
+      sudo groupadd docker
+      sudo usermod -aG docker $USER
+      sudo sh -c 'echo "{\"group\": \"docker\"}" > /etc/docker/daemon.json'
+      sudo chmod 666 /var/run/docker.sock
+      sudo systemctl restart docker
+      docker pull manriurv/lithops-plus-boto3:3.9
+      source /var/lib/cloud/scripts/eksctl/bootstrap.helper.sh
+      # Note "--node-labels=${NODE_LABELS}" needs the above helper sourced to work, otherwise will have to be defined manually.
+      /etc/eks/bootstrap.sh ${CLUSTER_NAME} --container-runtime dockerd --kubelet-extra-args "--node-labels=${NODE_LABELS}"

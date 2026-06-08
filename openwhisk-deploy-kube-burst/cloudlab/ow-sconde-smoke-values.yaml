@@ -1,0 +1,49 @@
+whisk:
+  ingress:
+    type: Standard
+    apiHostName: localhost
+    apiHostPort: 31001
+    apiHostProto: http
+    useInternally: false
+    domain: ow-sconde-smoke.local
+  testing:
+    includeTests: false
+    includeSystemTests: false
+  versions:
+    openwhisk:
+      gitTag: "72bb2a1"
+  containerPool:
+    userMemory: "8192m"
+
+controller:
+  imageName: "manriurv/controller"
+  imageTag: "classic"
+  imagePullPolicy: IfNotPresent
+
+invoker:
+  imageName: "manriurv/invoker"
+  imageTag: "classic"
+  imagePullPolicy: IfNotPresent
+  jvmHeapMB: "4096"
+  containerFactory:
+    impl: "kubernetes"
+    kubernetes:
+      allowUserActionsToRedis: true
+      replicaCount: 2
+
+benchmark:
+  workerPolicy:
+    workers: 2
+    cpuPerWorker: "1"
+    systemReservedCpu: "2"
+  actionPodCpu:
+    enabled: true
+    request: "1000m"
+    limit: "1000m"
+
+installPackages:
+  enabled: false
+
+k8s:
+  persistence:
+    enabled: false

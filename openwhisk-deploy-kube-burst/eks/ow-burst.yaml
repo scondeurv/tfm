@@ -1,0 +1,44 @@
+whisk:
+  middleware:
+    rabbitmq: "amqp://guest:guest@192.168.2.36:5672"
+    redisList: "redis://54.86.7.228:6379"
+    redisStream: "redis://54.86.7.228:6379"
+  # ingress:
+  #   type: NodePort
+  #   apiHostName: 10.0.11.122
+  #   apiHostPort: 31001
+  #   useInternally: false
+  ingress:
+    type: LoadBalancer
+    annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: arn:aws:iam::165415512318:server-certificate/ow-self-signed
+  versions:
+    openwhisk:
+      gitTag: "72bb2a1"
+controller:
+  imageName: "burstcomputing/controller"
+  imageTag: "latest"
+invoker:
+  imageName: "burstcomputing/invoker"
+  imageTag: "latest"
+  containerFactory:
+    impl: "docker"
+benchmark:
+  workerPolicy:
+    workers: 4
+    cpuPerWorker: "1"
+    systemReservedCpu: "6"
+  actionPodCpu:
+    enabled: false
+    request: "1000m"
+    limit: "1000m"
+nginx:
+  httpsNodePort: 31001
+zookeeper:
+  port: 2181
+k8s:
+  persistence:
+    enabled: false

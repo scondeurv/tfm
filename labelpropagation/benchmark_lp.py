@@ -122,45 +122,76 @@ def ensure_input_data(num_nodes, partitions, bucket, endpoint, key_prefix, graph
             f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
         )
 
-def benchmark_standalone(graph_file, num_nodes, max_iter):
-    """Run standalone Label Propagation and return the full output dict."""
-    binary_path = HERE / "lpst" / "target" / "release" / "label-propagation"
-    
-    if not binary_path.exists():
-        print(f"Error: Binary not found at {binary_path}", file=sys.stderr)
-        print("Run: cd lpst && cargo build --release", file=sys.stderr)
-        return None
-    
-    if not os.path.exists(graph_file):
-        print(f"Error: Graph file not found: {graph_file}", file=sys.stderr)
-        return None
-    
+def _run_single_node_binary(cmd, label, timeout):
+    """Shared launcher for standalone/rayon binaries. Returns parsed JSON or None."""
     try:
         result = subprocess.run(
-            [str(binary_path), graph_file, str(num_nodes), str(max_iter)],
-            capture_output=True,
-            text=True,
-            timeout=600,
-            cwd=HERE,
+            cmd, capture_output=True, text=True, timeout=timeout, cwd=HERE,
         )
-        
         if result.returncode != 0:
-            print(f"Error running standalone: {result.stderr}", file=sys.stderr)
+            print(f"Error running {label}: {result.stderr}", file=sys.stderr)
             return None
-        
-        # Parse JSON output
-        output = json.loads(result.stdout.strip())
-        return output
+        return json.loads(result.stdout.strip())
     except subprocess.TimeoutExpired:
-        print("Error: Standalone version timed out", file=sys.stderr)
+        print(f"Error: {label} timed out", file=sys.stderr)
         return None
     except json.JSONDecodeError as e:
-        print(f"Error parsing standalone output: {e}", file=sys.stderr)
-        print(f"Output was: {result.stdout}", file=sys.stderr)
+        print(f"Error parsing {label} output: {e}", file=sys.stderr)
         return None
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
         return None
+
+
+def benchmark_standalone(graph_file, num_nodes, max_iter, timeout=600):
+    """Run standalone (single-thread CSR) Label Propagation."""
+    binary_path = HERE / "lpst" / "target" / "release" / "label-propagation"
+    if not binary_path.exists():
+        print(f"Error: Binary not found at {binary_path}", file=sys.stderr)
+        print("Run: cd lpst && cargo build --release", file=sys.stderr)
+        return None
+    if not os.path.exists(graph_file):
+        print(f"Error: Graph file not found: {graph_file}", file=sys.stderr)
+        return None
+    cmd = [str(binary_path), graph_file, str(num_nodes), str(max_iter)]
+    return _run_single_node_binary(cmd, "standalone", timeout)
+
+
+def benchmark_rayon(graph_file, num_nodes, max_iter, threads=None, timeout=600):
+    """Run Rayon (multi-thread shared-memory CSR) Label Propagation."""
+    binary_path = HERE / "lp-rayon" / "target" / "release" / "lp-rayon"
+    if not binary_path.exists():
+        print(f"Error: Binary not found at {binary_path}", file=sys.stderr)
+        print("Run: cd lp-rayon && cargo build --release", file=sys.stderr)
+        return None
+    if not os.path.exists(graph_file):
+        print(f"Error: Graph file not found: {graph_file}", file=sys.stderr)
+        return None
+    cmd = [str(binary_path), graph_file, str(num_nodes), str(max_iter)]
+    if threads is not None:
+        cmd.append(str(threads))
+    return _run_single_node_binary(cmd, "rayon", timeout)
+
+
+def benchmark_mpi(graph_file, num_nodes, max_iter, ranks, hosts=None, timeout=600):
+    """Run MPI (distributed CSR via Allreduce-MIN) Label Propagation.
+
+    `hosts` is an optional comma-separated list (e.g. "compute6,compute7") passed
+    to `mpirun -H`. If `None`, ranks are scheduled by the local MPI runtime.
+    """
+    binary_path = HERE / "lp-mpi" / "target" / "release" / "lp-mpi"
+    if not binary_path.exists():
+        print(f"Error: Binary not found at {binary_path}", file=sys.stderr)
+        print("Run: cd lp-mpi && cargo build --release", file=sys.stderr)
+        return None
+    if not os.path.exists(graph_file):
+        print(f"Error: Graph file not found: {graph_file}", file=sys.stderr)
+        return None
+    cmd = ["mpirun", "-np", str(ranks)]
+    if hosts:
+        cmd += ["-H", hosts]
+    cmd += [str(binary_path), graph_file, str(num_nodes), str(max_iter)]
+    return _run_single_node_binary(cmd, "mpi", timeout)
 
 def run_validation(standalone_output, graph_file, num_nodes, max_iter, bucket, key, endpoint):
     """Run validation comparing standalone vs burst results."""
@@ -226,7 +257,7 @@ def benchmark_burst(
 ):
     """Run burst Label Propagation and return (host_total_ms, warm_total_ms, span_ms)."""
     s3_prefix = f"{key_prefix}/large-{num_nodes}"
-    burst_timeout_ms = int(os.environ.get("LP_BURST_TIMEOUT_MS", "900000"))
+    burst_timeout_ms = int(os.environ.get("LP_BURST_TIMEOUT_MS", "1800000"))
     
     params = generate_payload(
         endpoint=s3_endpoint,
@@ -424,6 +455,22 @@ if __name__ == "__main__":
     parser.add_argument("--validation-endpoint", default=DEFAULT_HOST_S3_ENDPOINT, help="S3 endpoint for local validation script")
     parser.add_argument("--bucket", default="test-bucket", help="S3 bucket name")
     parser.add_argument("--key-prefix", default="graphs", help="S3 key prefix")
+    parser.add_argument(
+        "--skip-clean",
+        action="store_true",
+        help=(
+            "Skip the pre-run `clean_burst_cluster` step. Use this for the warm "
+            "repetitions of the cold/warm protocol: the first invocation of a "
+            "(n, p, g, memory) cell runs WITHOUT this flag (cold start, fresh "
+            "pods); subsequent invocations of the same cell add the flag so the "
+            "OpenWhisk pool can serve the request from a warm container."
+        ),
+    )
+    parser.add_argument("--run-rayon", action="store_true", help="Also run Rayon backend")
+    parser.add_argument("--rayon-threads", type=int, default=None, help="Rayon thread count (default: rayon's own choice)")
+    parser.add_argument("--run-mpi", action="store_true", help="Also run MPI backend")
+    parser.add_argument("--mpi-ranks", type=int, default=None, help="MPI rank count")
+    parser.add_argument("--mpi-hosts", type=str, default=None, help="mpirun -H hostlist (e.g. compute6,compute7)")
     
     args = parser.parse_args()
     
@@ -460,7 +507,10 @@ if __name__ == "__main__":
     validation_skipped_reason = None
     if not args.skip_burst:
         burst_key_prefix = f"{args.key_prefix}/large-{args.nodes}"
-        clean_burst_cluster(args.ow_k8s_namespace, args.ow_release_name)
+        if args.skip_clean:
+            print("Skipping clean_burst_cluster (warm repetition).")
+        else:
+            clean_burst_cluster(args.ow_k8s_namespace, args.ow_release_name)
         if not args.skip_output_delete:
             delete_burst_output(args.bucket, burst_key_prefix, args.validation_endpoint)
         print(f"Running burst version...")
@@ -491,6 +541,30 @@ if __name__ == "__main__":
         else:
             print("Burst Time: FAILED")
     
+    # Optional extra single-node backends (cost_sweep phase).
+    rayon_output = None
+    rayon_time = None
+    if args.run_rayon:
+        print(f"Running Rayon backend (threads={args.rayon_threads})...")
+        rayon_output = benchmark_rayon(graph_file, args.nodes, args.iter, args.rayon_threads)
+        if rayon_output is not None:
+            rayon_time = rayon_output.get("execution_time_ms")
+            print(f"Rayon Execution Time: {rayon_time} ms (threads={rayon_output.get('threads')})")
+        else:
+            print("Rayon: FAILED")
+
+    mpi_output = None
+    mpi_time = None
+    if args.run_mpi:
+        ranks = args.mpi_ranks or args.partitions
+        print(f"Running MPI backend (ranks={ranks}, hosts={args.mpi_hosts})...")
+        mpi_output = benchmark_mpi(graph_file, args.nodes, args.iter, ranks, args.mpi_hosts)
+        if mpi_output is not None:
+            mpi_time = mpi_output.get("execution_time_ms")
+            print(f"MPI Execution Time: {mpi_time} ms (ranks={mpi_output.get('ranks')})")
+        else:
+            print("MPI: FAILED")
+
     # Calculate speedup
     if lpst_time:
         if burst_warm_time:

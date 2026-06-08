@@ -36,6 +36,29 @@ EXPERIMENT_ROOT = ROOT / "experiment_data" / "cloudlab_campaigns"
 BENCHMARK_PREFIX = "BENCHMARK_RESULT_JSON:"
 REMOTE_DEFAULT_SRC_ROOT = "/home/users/sconde/src"
 
+# infra/resource_capacity.py lives one level up; expose its types here so the
+# orchestrator gets a single import surface for resource fit-checking.
+_INFRA_DIR = ROOT / "infra"
+if str(_INFRA_DIR) not in sys.path:
+    sys.path.insert(0, str(_INFRA_DIR))
+from resource_capacity import (  # noqa: E402
+    HostCapacity,
+    HostBudget,
+    ResourceRequest,
+    burst_cluster_request,
+    spark_cluster_request,
+    parse_memory_to_mb,
+)
+
+# CloudLab worker nodes (compute6/compute7) physical caps. mpi-hosts declares
+# 32 slots/host → 32 logical CPUs; nodes carry 64 GiB RAM.
+CLOUDLAB_NODE_TOTAL_MEMORY_MB = 64 * 1024
+CLOUDLAB_NODE_LOGICAL_CPUS = 32
+# Headroom left for the OS + OpenWhisk control plane (controller/invoker/couchdb
+# co-resident on the worker) so a benchmark cell can't starve the cluster.
+CLOUDLAB_NODE_RESERVED_MEMORY_MB = 8 * 1024
+CLOUDLAB_NODE_RESERVED_CPUS = 4
+
 
 # ---------------------------------------------------------------------------
 # Utility primitives
@@ -102,12 +125,18 @@ def run_command(
 def _ssh_base(args) -> list[str]:
     return [
         "ssh",
+        *_ssh_config_args(args),
         "-i", args.cloudlab_ssh_key,
         "-o", "StrictHostKeyChecking=no",
         "-o", "BatchMode=yes",
         "-o", "ServerAliveInterval=30",
         f"{args.cloudlab_user}@{args.cloudlab_host}",
     ]
+
+
+def _ssh_config_args(args) -> list[str]:
+    cfg = getattr(args, "cloudlab_ssh_config", None) or os.environ.get("CLOUDLAB_SSH_CONFIG")
+    return ["-F", cfg] if cfg else []
 
 
 def ssh_command(
@@ -141,6 +170,7 @@ def ssh_python(
 def scp_to_remote(args, local: Path, remote: str) -> subprocess.CompletedProcess[str]:
     cmd = [
         "scp",
+        *_ssh_config_args(args),
         "-i", args.cloudlab_ssh_key,
         "-o", "StrictHostKeyChecking=no",
         "-o", "BatchMode=yes",
@@ -154,6 +184,7 @@ def scp_from_remote(args, remote: str, local: Path) -> subprocess.CompletedProce
     Path(local).parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "scp",
+        *_ssh_config_args(args),
         "-i", args.cloudlab_ssh_key,
         "-o", "StrictHostKeyChecking=no",
         "-o", "BatchMode=yes",
@@ -230,6 +261,100 @@ def parse_burst_config_matrix(partitions: int) -> dict[int, list[int]]:
     if partitions == 16:
         return {4: [2048, 3072], 8: [2048, 3072, 4096]}
     return {g: [2048, 3072, 4096] for g in valid_granularities(partitions)}
+
+
+# ---------------------------------------------------------------------------
+# Resource sizing and pre-launch fit-check
+# ---------------------------------------------------------------------------
+
+# Per-worker Burst memory tiers, keyed by graph size n. Calibrated to the
+# measured heap + S3-chunk message-buffer footprint of the Burst runtime:
+# campaign-0604 OOM'd at n=10M with m=2048 and only passed once bumped to 4096
+# (see project_campaign_0604 memory). n>5M gets 6144 for tail safety margin.
+# This REPLACES the hard-coded m=4096 stub previously injected by
+# launch_campaign_v3.sh, scaling memory with n instead of a single flat value.
+_BURST_MEM_TIERS_MB: tuple[tuple[float, int], ...] = (
+    (100_000, 2048),
+    (1_000_000, 3072),
+    (5_000_000, 4096),
+    (float("inf"), 6144),
+)
+_BURST_MEM_FLOOR_MB = 2048
+
+
+def burst_memory_mb(
+    algorithm: str,
+    nodes: int,
+    *,
+    budget_mb: int | None = None,
+    floor_mb: int = _BURST_MEM_FLOOR_MB,
+) -> int:
+    """Per-worker Burst action memory (MiB) scaled by graph size n.
+
+    ``algorithm`` is accepted for forward-compatibility (per-algo factors) but
+    currently every algorithm uses the same conservative tier — the admission
+    budget is large and over-provisioning memory does not perturb timings,
+    whereas under-provisioning OOMs the cell. ``budget_mb`` clamps to the
+    single-invoker user-memory budget so the value can never exceed admission.
+    """
+    base = next(mem for threshold, mem in _BURST_MEM_TIERS_MB if nodes <= threshold)
+    mem = max(floor_mb, base)
+    if budget_mb is not None:
+        mem = min(mem, budget_mb)
+    return mem
+
+
+def cloudlab_node_budget(
+    *,
+    total_memory_mb: int = CLOUDLAB_NODE_TOTAL_MEMORY_MB,
+    logical_cpus: int = CLOUDLAB_NODE_LOGICAL_CPUS,
+    reserved_memory_mb: int = CLOUDLAB_NODE_RESERVED_MEMORY_MB,
+    reserved_cpus: int = CLOUDLAB_NODE_RESERVED_CPUS,
+) -> HostBudget:
+    """HostBudget for a single CloudLab worker node (compute6/compute7)."""
+    return HostBudget(
+        host=HostCapacity(logical_cpus=logical_cpus, total_memory_mb=total_memory_mb),
+        reserved_cpus=reserved_cpus,
+        reserved_memory_mb=reserved_memory_mb,
+    )
+
+
+def burst_cell_fit(
+    *,
+    partitions: int,
+    granularity: int,
+    memory_mb: int,
+    budget: HostBudget | None = None,
+) -> tuple[bool, ResourceRequest]:
+    """Check whether a Burst cell fits a single worker node.
+
+    ``--burst-effective-invokers`` defaults to 1, so all ``partitions`` workers
+    co-reside on one invoker/node. Returns (fits, request) so callers can both
+    gate and log the request shape.
+    """
+    budget = budget or cloudlab_node_budget()
+    request = burst_cluster_request(
+        workers=partitions,
+        memory_per_worker_mb=memory_mb,
+        system_reserved_cpus=CLOUDLAB_NODE_RESERVED_CPUS,
+        system_reserved_mem_mb=CLOUDLAB_NODE_RESERVED_MEMORY_MB,
+    )
+    return request.fits(budget), request
+
+
+def spark_cell_fit(
+    *,
+    executors: int,
+    executor_memory: str | int,
+    budget: HostBudget | None = None,
+) -> tuple[bool, ResourceRequest]:
+    """Check whether a Spark cell fits a single worker node."""
+    budget = budget or cloudlab_node_budget()
+    request = spark_cluster_request(
+        executors=executors,
+        executor_memory=executor_memory,
+    )
+    return request.fits(budget), request
 
 
 def split_workers(total_executors: int) -> tuple[int, int]:
@@ -364,6 +489,33 @@ def failed_run_record(**kwargs) -> dict[str, Any]:
     return record
 
 
+def read_cached_record(path: Path) -> dict[str, Any] | None:
+    """Read a cached raw-run JSON, returning None on a missing/corrupt/truncated
+    file instead of raising. A partial write from an interrupted run must read as
+    a cache miss (regenerate), not crash the phase."""
+    try:
+        rec = read_json(path)
+    except Exception:
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def cached_record_ok(cached: Any) -> bool:
+    """Whether a cached record can be trusted as a completed cell. Rejects
+    failed/blocked records (so a resume re-runs them) and 'passed' records that
+    carry no result payload (corruption). Measured non-pass statuses (e.g.
+    'timeout_900s') are valid structural findings and kept."""
+    if not isinstance(cached, dict):
+        return False
+    status = cached.get("status")
+    if status in ("failed", "blocked"):
+        return False
+    if status in ("passed", "ok"):
+        return bool(cached.get("result"))
+    # Legacy records without an explicit status, or measured timeout statuses.
+    return bool(cached.get("result")) or status is not None
+
+
 def summarize_runtime_probes(probe_rows: list[dict[str, Any]]) -> dict[str, Any]:
     by_mode: dict[str, list[dict[str, Any]]] = {}
     for row in probe_rows:
@@ -410,7 +562,14 @@ def summarize_runtime_probes(probe_rows: list[dict[str, Any]]) -> dict[str, Any]
 # ---------------------------------------------------------------------------
 
 def ensure_remote_openwhisk_api(args, campaign_root: Path) -> None:
-    """Ensure a port-forward exists from local args.ow_port to the OW gateway."""
+    """Ensure a port-forward exists from local args.ow_port to the OW gateway.
+
+    Skipped when ``args.ow_host`` is not ``127.0.0.1`` — that signals the
+    caller wants to reach OW directly (e.g. via the cluster's nginx
+    ClusterIP from a Kubernetes worker node), so no port-forward is needed.
+    """
+    if args.ow_host != "127.0.0.1":
+        return
     pid_file = args.remote_ow_port_forward_pid_file
     log_file = args.remote_ow_port_forward_log_file
     namespace = shlex.quote(args.ow_namespace)
@@ -547,7 +706,7 @@ def run_runtime_probe(
         "--memory", str(args.characterization_memory_mb),
         "--iterations", str(args.characterization_iterations),
         "--payload-bytes", str(args.characterization_payload_bytes),
-        "--ow-host", "127.0.0.1",
+        "--ow-host", args.ow_host,
         "--ow-port", str(args.ow_port),
         "--ow-protocol", shlex.quote(args.ow_protocol),
         "--backend", shlex.quote(args.backend),

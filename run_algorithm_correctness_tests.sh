@@ -31,7 +31,9 @@ fi
 ensure_middleware_link "bfs"
 ensure_middleware_link "sssp"
 ensure_middleware_link "labelpropagation"
+ensure_middleware_link "wcc"
 
 run_cargo_tests "BFS Burst core" "bfs/ow-bfs"
 run_cargo_tests "SSSP Burst core" "sssp/ow-sssp"
 run_cargo_tests "Label Propagation Burst core" "labelpropagation/ow-lp"
+run_cargo_tests "WCC Burst core" "wcc/ow-uf"

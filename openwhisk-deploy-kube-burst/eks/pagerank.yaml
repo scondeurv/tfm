@@ -1,0 +1,44 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: pagerank-cluster
+  region: us-east-1 # north virginia
+  version: "1.23"
+
+nodeGroups:
+  - name: core
+    #instanceType: a1.xlarge
+    labels: { openwhisk-role: core }
+    desiredCapacity: 1
+    minSize: 1
+    maxSize: 1
+    instanceSelector:
+      vCPUs: 4
+      memory: 8GiB
+      cpuArchitecture: x86_64
+  - name: invokers
+    #instanceType: a1.xlarge # 4 cpu - 8GB
+    labels: { openwhisk-role: invoker }
+    amiFamily: AmazonLinux2
+    ami: ami-05cca29d4609d8ec1
+    desiredCapacity: 4
+    minSize: 4
+    maxSize: 4
+    ssh:
+      allow: true
+    instancesDistribution:
+      instanceTypes: ["c7i.16xlarge"]
+      onDemandBaseCapacity: 0
+      onDemandPercentageAboveBaseCapacity: 0
+    overrideBootstrapCommand: |
+      #!/bin/bash
+      sudo groupadd docker
+      sudo usermod -aG docker $USER
+      sudo sh -c 'echo "{\"group\": \"docker\"}" > /etc/docker/daemon.json'
+      sudo chmod 666 /var/run/docker.sock
+      sudo systemctl restart docker
+      docker pull burstcomputing/runtime-rust-burst:latest
+      source /var/lib/cloud/scripts/eksctl/bootstrap.helper.sh
+      # Note "--node-labels=${NODE_LABELS}" needs the above helper sourced to work, otherwise will have to be defined manually.
+      /etc/eks/bootstrap.sh ${CLUSTER_NAME} --container-runtime dockerd --kubelet-extra-args "--node-labels=${NODE_LABELS}"
