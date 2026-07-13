@@ -47,16 +47,71 @@ The deployable Burst/OpenWhisk action packages (`*.zip`) are built from source
 by the per-algorithm `compile_*.sh` scripts before deployment; they are not
 stored in the repository.
 
+## Build
+
+The `standalone` and `rayon` tiers and the distributed `mpi` tier are Rust
+crates. Build each with `cargo build --release` in its crate directory, e.g.:
+
+```bash
+(cd bfs/bfs-standalone && cargo build --release)
+(cd bfs/bfs-rayon      && cargo build --release)
+(cd bfs/bfs-mpi        && cargo build --release)
+```
+
+The Burst/OpenWhisk action packages are built by the per-algorithm
+`compile_*.sh` scripts (e.g. `labelpropagation/compile_lp_cluster.sh`).
+
+### MPI toolchain
+
+The MPI crates use `rsmpi` (`mpi = "0.8"`), which builds against **OpenMPI 4.x
+only** — it does *not* compile against OpenMPI 5.x, whose `MPI_Status` layout
+changed. The campaign used OpenMPI 4.1.5. Point the build at a 4.1.x install:
+
+```bash
+export PATH=/path/to/openmpi-4.1.5/bin:$PATH
+export LD_LIBRARY_PATH=/path/to/openmpi-4.1.5/lib
+export MPICC=/path/to/openmpi-4.1.5/bin/mpicc
+```
+
+On a distribution whose system OpenMPI is 5.x, build 4.1.5 from source into a
+local prefix (`--without-ofi` avoids a clash with a modern libfabric):
+
+```bash
+./configure --prefix=$HOME/opt/ompi415 --disable-mpi-fortran --without-ofi
+make -j"$(nproc)" && make install
+```
+
+`rsmpi`'s `mpi-sys` pins `bindgen 0.69`, which fails to parse the MPI headers
+with a very new `libclang` (≳ 18) and emits an opaque `MPI_Status`. If the MPI
+crates fail with `no field 'MPI_SOURCE' on type 'ompi_status_public_t'`, point
+bindgen at an older libclang (≤ 17):
+
+```bash
+pip install "libclang==16.0.6"
+export LIBCLANG_PATH="$(python3 -c 'import clang.native,os; print(os.path.dirname(clang.native.__file__))')"
+```
+
 ## Test
 
-From the unpacked package root:
+From the unpacked package root, the self-contained suite (no cluster, no
+external services) is:
 
 ```bash
 ./run_e2e_tests.sh all
 ```
 
-These tests do not require MinIO, OpenWhisk, external validators, or standalone
-algorithm crates.
+The oracle + property-based correctness suite additionally needs
+NetworkX/Hypothesis in a dedicated venv and the built `standalone`/`rayon`/`mpi`
+binaries; it then validates every backend against the NetworkX reference:
+
+```bash
+python3 -m venv tests/.venv-test
+tests/.venv-test/bin/pip install -r tests/requirements-test.txt
+./run_e2e_tests.sh correctness
+```
+
+The `all` suite needs neither MinIO/OpenWhisk nor external validators; the
+`correctness` suite needs only the venv and built binaries shown above.
 
 For algorithmic correctness of the Rust Burst cores:
 
