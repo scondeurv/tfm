@@ -25,6 +25,9 @@ aws-credential-types = { version = "1.2.3", features = ["hardcoded-credentials"]
 clap = { version = "=4.5.4", features = ["derive"] }
 clap_lex = "=1.0.0"
 
+[dev-dependencies]
+pagerank-core = { path = "../pagerank-core" }
+
 [lib]
 name = "actions"
 path = "src/lib.rs"
@@ -32,3 +35,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "harness"
 path = "src/harness.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

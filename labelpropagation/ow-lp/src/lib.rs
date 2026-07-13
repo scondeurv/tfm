@@ -33,6 +33,7 @@
 use ahash::AHashMap as HashMap;
 use std::{
     cmp::Ordering,
+    sync::{Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -84,6 +85,11 @@ struct Input {
     /// Reserved field for a future per-call collective-operation timeout
     /// override. Currently parsed but not applied.
     timeout_seconds: Option<u64>,
+    /// Enable the in-memory burst-local partition cache (defaults to `true`).
+    /// Set to `false` to force the S3 fetch + parse + CSR build on every
+    /// invocation, reproducing the un-cached deployment behaviour.
+    #[serde(default)]
+    use_cache: Option<bool>,
 }
 
 /// S3 endpoint + credentials + key prefix where partition shards live.
@@ -368,6 +374,32 @@ fn build_results_report(final_labels: &[u32], num_nodes: u32, completed_iteratio
     report
 }
 
+/// Cross-invocation, burst-local partition cache (the in-memory cache
+/// proposed by the Burst Computing paper). The ActionLoop runtime keeps
+/// this process alive across warm invocations, so a warm burst that
+/// re-requests the same partition skips the S3 fetch + parse + CSR build
+/// entirely. For LP the cached value bundles the CSR graph with the seed
+/// `(node, label)` pairs parsed from the same shard. Keyed by
+/// `{key}/part-{worker:05}`; all workers of the pack share the map (they
+/// run as threads of this process). Entries whose key does not start with
+/// the current dataset prefix are evicted on lookup, so a size sweep
+/// cannot accumulate CSRs beyond the container memory limit.
+type CachedPartition = Arc<(CSRGraph, Vec<(u32, u32)>)>;
+static PARTITION_CACHE: OnceLock<Mutex<std::collections::HashMap<String, CachedPartition>>> =
+    OnceLock::new();
+
+fn partition_cache_lookup(part_key: &str, dataset_prefix: &str) -> Option<CachedPartition> {
+    let cache = PARTITION_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut map = cache.lock().unwrap();
+    map.retain(|k, _| k.starts_with(dataset_prefix));
+    map.get(part_key).cloned()
+}
+
+fn partition_cache_store(part_key: String, entry: CachedPartition) {
+    let cache = PARTITION_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    cache.lock().unwrap().insert(part_key, entry);
+}
+
 /// Fetch this worker's partition shard from S3 and turn it into a
 /// [`CSRGraph`] plus the list of seed `(node, label)` pairs found in the
 /// shard. Network failures, body-decoding errors, and malformed UTF-8 are
@@ -501,8 +533,8 @@ fn majority_label(counts: &mut HashMap<u32, usize>, current: u32) -> u32 {
 fn run_label_propagation_core(
     params: &Input,
     middleware: &MiddlewareActorHandle<LabelsMessage>,
-    graph: CSRGraph,
-    initial_labels_vec: Vec<(u32, u32)>,
+    graph: &CSRGraph,
+    initial_labels_vec: &[(u32, u32)],
     mut timestamps: Vec<Timestamp>,
 ) -> (Vec<Timestamp>, Vec<u32>, u32) {
     let worker = middleware.info.worker_id;
@@ -522,7 +554,7 @@ fn run_label_propagation_core(
     );
 
     // Share only the seeded nodes so the initial collective stays small.
-    let initial_msg = encode_seed_pairs(&initial_labels_vec);
+    let initial_msg = encode_seed_pairs(initial_labels_vec);
     let combined = middleware
         .reduce(initial_msg, |mut left, right| {
             left.0.extend(right.0);
@@ -657,13 +689,36 @@ fn label_propagation(params: Input, middleware: &MiddlewareActorHandle<LabelsMes
         .build()
         .unwrap();
 
-    // Load this worker's partition shard from S3 and build the local CSR graph.
+    // Load this worker's partition shard from S3 and build the local CSR
+    // graph, or reuse the burst-local cached copy on a warm invocation.
     timestamps.push(timestamp("get_input"));
-    let (graph, initial_labels_vec) = rt
-        .block_on(load_partition_flat(&params, &s3_client, worker))
-        .unwrap_or_else(|err| panic!("{err}"));
+    let use_cache = params.use_cache.unwrap_or(true);
+    let part_key = format!("{}/part-{:05}", params.input_data.key, worker);
+    let cached = if use_cache {
+        partition_cache_lookup(&part_key, &params.input_data.key)
+    } else {
+        None
+    };
+    let partition: CachedPartition = match cached {
+        Some(entry) => {
+            println!("[Worker {worker}] partition cache HIT for {part_key}");
+            timestamps.push(timestamp("get_input_cache_hit"));
+            entry
+        }
+        None => {
+            let entry = Arc::new(
+                rt.block_on(load_partition_flat(&params, &s3_client, worker))
+                    .unwrap_or_else(|err| panic!("{err}")),
+            );
+            if use_cache {
+                partition_cache_store(part_key, entry.clone());
+            }
+            entry
+        }
+    };
     timestamps.push(timestamp("get_input_end"));
 
+    let (graph, initial_labels_vec) = (&partition.0, &partition.1[..]);
     let (mut timestamps, final_labels, completed_iterations) =
         run_label_propagation_core(&params, middleware, graph, initial_labels_vec, timestamps);
 
@@ -956,6 +1011,18 @@ mod tests {
     }
 
     #[test]
+    fn partition_cache_hit_and_prefix_eviction() {
+        let g = build_csr_graph(2, vec![(0, 1)]);
+        let entry = Arc::new((g, vec![(0u32, 7u32)]));
+        partition_cache_store("dsA/part-00000".to_string(), entry);
+        let hit = partition_cache_lookup("dsA/part-00000", "dsA").expect("expected cache hit");
+        assert_eq!(hit.1, vec![(0, 7)], "cached seeds must round-trip");
+        // A lookup under a different dataset prefix evicts the stale entry.
+        assert!(partition_cache_lookup("dsB/part-00000", "dsB").is_none());
+        assert!(partition_cache_lookup("dsA/part-00000", "dsA").is_none());
+    }
+
+    #[test]
     fn parse_partition_body_skips_invalid_and_negative_labels() {
         let body = "0\t1\t5\n1\t99\t3\nbad line\n2\t0\t-1\n3\t1\n";
         let mut edges = Vec::new();
@@ -1024,6 +1091,7 @@ mod tests {
             granularity: 1,
             group_id: None,
             timeout_seconds: None,
+            use_cache: Some(false),
         }
     }
 
@@ -1081,10 +1149,10 @@ mod tests {
         let (g0, s0) = worker0;
         let (g1, s1) = worker1;
         let thread0 = thread::spawn(move || {
-            run_label_propagation_core(&params0, &handle0, g0, s0, vec![timestamp("ws")])
+            run_label_propagation_core(&params0, &handle0, &g0, &s0, vec![timestamp("ws")])
         });
         let thread1 = thread::spawn(move || {
-            run_label_propagation_core(&params1, &handle1, g1, s1, vec![timestamp("ws")])
+            run_label_propagation_core(&params1, &handle1, &g1, &s1, vec![timestamp("ws")])
         });
         let (_, labels0, iters0) = thread0.join().unwrap();
         let (_, labels1, iters1) = thread1.join().unwrap();

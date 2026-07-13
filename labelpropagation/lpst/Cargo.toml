@@ -23,3 +23,7 @@ path = "src/bin/generate_graph.rs"
 [[bin]]
 name = "run_label_propagation"
 path = "src/bin/run_label_propagation.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

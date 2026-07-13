@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-master
+  namespace: __NAMESPACE__
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: spark-master
+  template:
+    metadata:
+      labels:
+        app: spark-master
+    spec:
+      enableServiceLinks: false
+      nodeSelector:
+        kubernetes.io/hostname: __MASTER_NODE__
+      initContainers:
+        - name: s3a-jars
+          image: curlimages/curl:8.7.1
+          command:
+            - sh
+            - -ceu
+            - |
+              curl -fsSL -o /opt/spark/extra-jars/hadoop-aws-3.3.4.jar \
+                https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar
+              curl -fsSL -o /opt/spark/extra-jars/aws-java-sdk-bundle-1.12.262.jar \
+                https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar
+          volumeMounts:
+            - name: spark-extra-jars
+              mountPath: /opt/spark/extra-jars
+      containers:
+        - name: spark-master
+          image: __SPARK_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/bash
+            - -lc
+            - exec /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master --host "${POD_IP}" --port 7077 --webui-port 8080
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: SPARK_LOCAL_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: SPARK_CLASSPATH
+              value: /opt/spark/extra-jars/*
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: spark-minio-creds
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: spark-minio-creds
+                  key: AWS_SECRET_ACCESS_KEY
+          ports:
+            - containerPort: 7077
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: "__MASTER_REQUEST_CPU__"
+              memory: __MASTER_REQUEST_MEMORY__
+            limits:
+              cpu: "__MASTER_LIMIT_CPU__"
+              memory: __MASTER_LIMIT_MEMORY__
+          volumeMounts:
+            - name: spark-lp-scripts
+              mountPath: /opt/tfm-spark/scripts
+              readOnly: true
+            - name: spark-extra-jars
+              mountPath: /opt/spark/extra-jars
+      volumes:
+        - name: spark-lp-scripts
+          configMap:
+            name: spark-lp-scripts
+        - name: spark-extra-jars
+          emptyDir: {}

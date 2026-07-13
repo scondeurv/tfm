@@ -1,7 +1,9 @@
 # TFM CloudLab Campaign Artifact
 
-This archive contains the source code, scripts, tests, and prebuilt OpenWhisk
-action ZIPs needed to run the CloudLab graph benchmark campaign.
+This archive contains the source code, scripts, and tests needed to run the
+CloudLab graph benchmark campaign. The OpenWhisk/Burst action packages are
+compiled on demand by the per-algorithm `compile_*.sh` scripts and are not
+committed to the repository.
 
 The included campaign algorithms are:
 
@@ -37,13 +39,13 @@ setsid nohup ./run_rest_campaign.sh &
 - `data_utils/`: dataset generation and upload helpers for the graph workloads.
 - `openwhisk-deploy-kube-burst/`: OpenWhisk-on-Kubernetes deployment manifests/scripts used by the campaign.
 - `burst-communication-middleware/`: Rust communication middleware used by Burst actions.
-- `labelpropagation/`, `bfs/`, `sssp/`, `pagerank/`: algorithm implementations, benchmark drivers, Spark smoke scripts, and action packages.
+- `labelpropagation/`, `bfs/`, `sssp/`, `pagerank/`: algorithm implementations, benchmark drivers, and the `compile_*.sh` scripts that build each paradigm's binaries and action packages.
+- `baselines/`: Apache Spark/GraphX jobs and deployment for the big-data tier.
 - `tests/`: self-contained local regression tests.
 
-Prebuilt action ZIPs included in the artifact:
-
-- `labelpropagation/labelpropagation.zip`
-- `labelpropagation/runtime_probe.zip`
+The deployable Burst/OpenWhisk action packages (`*.zip`) are built from source
+by the per-algorithm `compile_*.sh` scripts before deployment; they are not
+stored in the repository.
 
 ## Test
 

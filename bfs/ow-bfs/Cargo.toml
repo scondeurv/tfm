@@ -39,3 +39,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "testing"
 path = "src/testing.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

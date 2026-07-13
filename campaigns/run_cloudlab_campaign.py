@@ -338,7 +338,7 @@ finally:
 # Burst benchmark invocation (algorithm-specific CLI args)
 # ---------------------------------------------------------------------------
 
-def _burst_args_lp(args: argparse.Namespace, algo: AlgorithmConfig, *, nodes, partitions, granularity, memory_mb, graph_file, skip_clean: bool = True) -> list[str]:
+def _burst_args_lp(args: argparse.Namespace, algo: AlgorithmConfig, *, nodes, partitions, granularity, memory_mb, graph_file, skip_clean: bool = True, skip_action_update: bool = False) -> list[str]:
     load_prefix = f"{algo_burst_key_prefix(args, algo)}/large-{nodes}"
     cmd = [
         "python3", algo.benchmark_script,
@@ -364,10 +364,14 @@ def _burst_args_lp(args: argparse.Namespace, algo: AlgorithmConfig, *, nodes, pa
     ]
     if skip_clean:
         cmd.append("--skip-clean")
+    if skip_action_update:
+        # Warm shot: keep the pool valid — re-registering the action would bump
+        # its revision and force cold starts, defeating the warm-pool protocol.
+        cmd.append("--skip-action-update")
     return cmd
 
 
-def _burst_args_bfs(args: argparse.Namespace, algo: AlgorithmConfig, *, nodes, partitions, granularity, memory_mb, graph_file, skip_clean: bool = True) -> list[str]:
+def _burst_args_bfs(args: argparse.Namespace, algo: AlgorithmConfig, *, nodes, partitions, granularity, memory_mb, graph_file, skip_clean: bool = True, skip_action_update: bool = False) -> list[str]:
     cmd = [
         "python3", algo.benchmark_script,
         "--nodes", str(nodes),
@@ -388,10 +392,14 @@ def _burst_args_bfs(args: argparse.Namespace, algo: AlgorithmConfig, *, nodes, p
     ]
     if skip_clean:
         cmd.append("--skip-clean")
+    if skip_action_update:
+        # Warm shot: keep the pool valid — re-registering the action would bump
+        # its revision and force cold starts, defeating the warm-pool protocol.
+        cmd.append("--skip-action-update")
     return cmd
 
 
-def _burst_args_sssp(args: argparse.Namespace, algo: AlgorithmConfig, *, nodes, partitions, granularity, memory_mb, graph_file, skip_clean: bool = True) -> list[str]:
+def _burst_args_sssp(args: argparse.Namespace, algo: AlgorithmConfig, *, nodes, partitions, granularity, memory_mb, graph_file, skip_clean: bool = True, skip_action_update: bool = False) -> list[str]:
     cmd = [
         "python3", algo.benchmark_script,
         "--nodes", str(nodes),
@@ -412,10 +420,14 @@ def _burst_args_sssp(args: argparse.Namespace, algo: AlgorithmConfig, *, nodes, 
     ]
     if skip_clean:
         cmd.append("--skip-clean")
+    if skip_action_update:
+        # Warm shot: keep the pool valid — re-registering the action would bump
+        # its revision and force cold starts, defeating the warm-pool protocol.
+        cmd.append("--skip-action-update")
     return cmd
 
 
-def _burst_args_pagerank(args: argparse.Namespace, algo: AlgorithmConfig, *, nodes, partitions, granularity, memory_mb, graph_file, skip_clean: bool = True) -> list[str]:
+def _burst_args_pagerank(args: argparse.Namespace, algo: AlgorithmConfig, *, nodes, partitions, granularity, memory_mb, graph_file, skip_clean: bool = True, skip_action_update: bool = False) -> list[str]:
     cmd = [
         "python3", algo.benchmark_script,
         "--nodes", str(nodes),
@@ -436,6 +448,10 @@ def _burst_args_pagerank(args: argparse.Namespace, algo: AlgorithmConfig, *, nod
     ]
     if skip_clean:
         cmd.append("--skip-clean")
+    if skip_action_update:
+        # Warm shot: keep the pool valid — re-registering the action would bump
+        # its revision and force cold starts, defeating the warm-pool protocol.
+        cmd.append("--skip-action-update")
     return cmd
 
 
@@ -511,6 +527,7 @@ def _invoke_burst_shot(
     graph_file: Path,
     log_path: Path,
     skip_clean: bool,
+    skip_action_update: bool = False,
 ) -> dict[str, Any]:
     """Run a single Burst benchmark invocation via SSH and return parsed result.
 
@@ -526,7 +543,7 @@ def _invoke_burst_shot(
         args, algo,
         nodes=nodes, partitions=partitions, granularity=granularity,
         memory_mb=memory_mb, graph_file=graph_file,
-        skip_clean=skip_clean,
+        skip_clean=skip_clean, skip_action_update=skip_action_update,
     )
     env_parts = [
         "env",
@@ -823,6 +840,7 @@ def run_burst(
             granularity=granularity, memory_mb=memory_mb,
             graph_file=graph_file, log_path=warm_log,
             skip_clean=True,
+            skip_action_update=True,
         )
         write_json(warm_dir / f"{base_name}_warm_rep{i}.json", shot)
         _validate_burst_shot(

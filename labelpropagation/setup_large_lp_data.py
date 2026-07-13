@@ -6,7 +6,7 @@ Creates a local .txt graph file and, optionally, S3 partitions for Burst.
 Supports two graph models:
   --model random  (default) Random directed graph, same structure as BFS/SSSP.
                   density=10 outgoing edges per node, numpy RNG seed=42.
-                  Seeds: 10% of nodes, 4 label groups by node_id % 4.
+                  Unsupervised: 2-column edges (src\tdst), no seed labels.
   --model ring    Legacy ring graph where node i connects to i+1..i+density.
                   Seeds: 10% of nodes, 4 label groups by position in ring.
 """
@@ -23,8 +23,8 @@ def generate_random_graph(num_nodes, num_partitions, output_local, bucket=None, 
 
     Same topology as BFS/SSSP: every node i gets `density` random outgoing edges
     to distinct nodes (no self-loops), generated with numpy RNG seed.
-    10% of nodes (every 10th) are seeded with a label based on node_id % 4,
-    producing 4 balanced label groups regardless of graph topology.
+    Unsupervised: edges are 2-column (src\tdst) with no seed labels, so the
+    solver initializes every node to its own id and converges by majority vote.
     """
     print(f"Generating LP random graph: {num_nodes:,} nodes, density={density}, seed={seed}...")
 
@@ -35,13 +35,10 @@ def generate_random_graph(num_nodes, num_partitions, output_local, bucket=None, 
     raw = rng.integers(0, num_nodes - 1, size=total_edges, dtype=np.int64)
     dst = np.where(raw >= src, raw + 1, raw)
 
-    edges = []
-    for s, d in zip(src.tolist(), dst.tolist()):
-        if s % 10 == 0:
-            label = (s % 4) * 100  # 4 balanced groups: 0, 100, 200, 300
-            edges.append(f"{s}\t{d}\t{label}")
-        else:
-            edges.append(f"{s}\t{d}")
+    # Unsupervised LP: emit 2 columns only (src\tdst, no seed labels).
+    # Empty initial_labels -> every node starts as its own label (labels[i]=i),
+    # canonical Raghavan-2007 majority-vote community detection.
+    edges = [f"{s}\t{d}" for s, d in zip(src.tolist(), dst.tolist())]
 
     print(f"  Generated {len(edges):,} edges total")
     _write_and_upload(edges, num_partitions, output_local, bucket, s3_prefix, endpoint, access_key, secret_key)

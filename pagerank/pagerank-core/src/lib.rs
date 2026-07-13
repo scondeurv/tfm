@@ -114,6 +114,48 @@ pub fn power_iter_contribute(
     dangling_mass
 }
 
+/// Transposed (destination-major) CSR: for each vertex `v`,
+/// `in_offsets[v]..in_offsets[v+1]` indexes `in_neighbors` listing the source
+/// vertices `u` with an edge `u -> v`. Enables a contention-free pull-style
+/// parallel contribute (each destination sums its in-neighbours independently).
+pub struct CsrTranspose {
+    pub in_offsets: Vec<u32>,
+    pub in_neighbors: Vec<u32>,
+}
+
+/// Build the transpose of a source-major CSR. O(n + m), single pass over edges.
+pub fn build_csr_transpose(csr: &Csr) -> CsrTranspose {
+    let n = csr.num_nodes as usize;
+    let mut in_degree = vec![0u32; n];
+    for &v in &csr.out_neighbors {
+        if (v as usize) < n {
+            in_degree[v as usize] += 1;
+        }
+    }
+    let mut in_offsets = vec![0u32; n + 1];
+    let mut acc = 0u32;
+    for v in 0..n {
+        in_offsets[v] = acc;
+        acc = acc.saturating_add(in_degree[v]);
+    }
+    in_offsets[n] = acc;
+    let mut cursor = in_offsets.clone();
+    let mut in_neighbors = vec![0u32; acc as usize];
+    for u in 0..n {
+        let start = csr.row_offsets[u] as usize;
+        let end = csr.row_offsets[u + 1] as usize;
+        for k in start..end {
+            let v = csr.out_neighbors[k] as usize;
+            if v < n {
+                let slot = cursor[v] as usize;
+                in_neighbors[slot] = u as u32;
+                cursor[v] += 1;
+            }
+        }
+    }
+    CsrTranspose { in_offsets, in_neighbors }
+}
+
 /// Serial PageRank power iteration with damping + dangling redistribution.
 /// Returns the converged rank vector (sums to 1.0).
 pub fn run_pagerank(

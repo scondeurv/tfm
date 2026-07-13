@@ -158,6 +158,7 @@ def benchmark_burst(
     key_prefix: str = "graphs",
     backend: str = "redis-list",
     chunk_size: int = 1024,
+    register_action=True,
 ):
     """Run the distributed BFS burst action and return phase-aware metrics."""
     s3_prefix = f"{key_prefix}/large-bfs-{num_nodes}"
@@ -190,6 +191,7 @@ def benchmark_burst(
             chunk_size=chunk_size,
             is_zip=True,
             timeout=1800000,
+            register_action=register_action,
         )
         finished = get_millis()
 
@@ -467,6 +469,11 @@ if __name__ == "__main__":
             "OpenWhisk pool can serve the request from a warm container."
         ),
     )
+    parser.add_argument(
+        "--skip-action-update",
+        action="store_true",
+        help="Do not re-register the OpenWhisk action before invoking. Keeps warm containers valid (re-registration bumps the action revision and invalidates the warm pool).",
+    )
     parser.add_argument("--iter", dest="iter_alias", type=int, default=None,
                         help="Alias for --max-levels (used by run_cost_sweep). Overrides --max-levels if given.")
     parser.add_argument("--run-rayon", action="store_true", help="Also run Rayon backend")
@@ -524,6 +531,7 @@ if __name__ == "__main__":
             key_prefix=args.key_prefix,
             backend=args.backend,
             chunk_size=args.chunk_size,
+            register_action=not args.skip_action_update,
         )
         if burst_host_time is not None:
             print(f"BFS Burst Time (Host Total / Cold): {burst_host_time} ms")

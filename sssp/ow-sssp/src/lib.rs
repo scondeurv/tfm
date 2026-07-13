@@ -42,6 +42,7 @@
 
 use std::{
     fmt::Write as _,
+    sync::{Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -91,6 +92,11 @@ struct Input {
     /// Reserved for a future per-call collective-operation timeout
     /// override; currently parsed but not applied.
     timeout_seconds: Option<u64>,
+    /// Enable the in-memory burst-local partition cache (defaults to `true`).
+    /// Set to `false` to force the S3 fetch + parse + CSR build on every
+    /// invocation, reproducing the un-cached deployment behaviour.
+    #[serde(default)]
+    use_cache: Option<bool>,
 }
 
 /// S3 endpoint + credentials + key prefix where partition shards live.
@@ -298,6 +304,30 @@ fn build_csr_graph(num_nodes: u32, mut edges: Vec<(u32, u32, f32)>) -> CSRGraph 
     }
 }
 
+/// Cross-invocation, burst-local partition cache (the in-memory cache
+/// proposed by the Burst Computing paper). The ActionLoop runtime keeps
+/// this process alive across warm invocations, so a warm burst that
+/// re-requests the same partition skips the S3 fetch + parse + CSR build
+/// entirely. Keyed by `{key}/part-{worker:05}`; all workers of the pack
+/// share the map (they run as threads of this process). Entries whose key
+/// does not start with the current dataset prefix are evicted on lookup,
+/// so a size sweep cannot accumulate CSRs beyond the container memory
+/// limit.
+static PARTITION_CACHE: OnceLock<Mutex<std::collections::HashMap<String, Arc<CSRGraph>>>> =
+    OnceLock::new();
+
+fn partition_cache_lookup(part_key: &str, dataset_prefix: &str) -> Option<Arc<CSRGraph>> {
+    let cache = PARTITION_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut map = cache.lock().unwrap();
+    map.retain(|k, _| k.starts_with(dataset_prefix));
+    map.get(part_key).cloned()
+}
+
+fn partition_cache_store(part_key: String, graph: Arc<CSRGraph>) {
+    let cache = PARTITION_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    cache.lock().unwrap().insert(part_key, graph);
+}
+
 /// Fetch this worker's partition shard from S3 and turn it into a
 /// [`CSRGraph`]. Network failures, body-decoding errors, and malformed
 /// UTF-8 are surfaced as `Err(String)` so the caller can panic with a
@@ -429,7 +459,7 @@ fn build_results_report(
 fn run_sssp_core(
     params: &Input,
     middleware: &MiddlewareActorHandle<DistanceMessage>,
-    graph: CSRGraph,
+    graph: &CSRGraph,
     mut timestamps: Vec<Timestamp>,
 ) -> (Vec<Timestamp>, Vec<u32>, u32, u64) {
     let worker = middleware.info.worker_id;
@@ -564,13 +594,34 @@ fn sssp(params: Input, middleware: &MiddlewareActorHandle<DistanceMessage>) -> O
         .unwrap();
 
     timestamps.push(timestamp("get_input"));
-    let graph = rt
-        .block_on(load_partition_flat(&params, &s3_client, worker))
-        .unwrap_or_else(|err| panic!("{err}"));
+    let use_cache = params.use_cache.unwrap_or(true);
+    let part_key = format!("{}/part-{:05}", params.input_data.key, worker);
+    let cached = if use_cache {
+        partition_cache_lookup(&part_key, &params.input_data.key)
+    } else {
+        None
+    };
+    let graph: Arc<CSRGraph> = match cached {
+        Some(g) => {
+            println!("[Worker {worker}] partition cache HIT for {part_key}");
+            timestamps.push(timestamp("get_input_cache_hit"));
+            g
+        }
+        None => {
+            let g = Arc::new(
+                rt.block_on(load_partition_flat(&params, &s3_client, worker))
+                    .unwrap_or_else(|err| panic!("{err}")),
+            );
+            if use_cache {
+                partition_cache_store(part_key, g.clone());
+            }
+            g
+        }
+    };
     timestamps.push(timestamp("get_input_end"));
 
     let (mut timestamps, dist_bits, executed_iters, total_relaxed) =
-        run_sssp_core(&params, middleware, graph, timestamps);
+        run_sssp_core(&params, middleware, &graph, timestamps);
 
     let source = params.source_node.unwrap_or(0);
     let results_report = if worker == ROOT_WORKER {
@@ -872,6 +923,16 @@ mod tests {
     }
 
     #[test]
+    fn partition_cache_hit_and_prefix_eviction() {
+        let g = Arc::new(build_csr_graph(2, vec![(0, 1, 1.0)]));
+        partition_cache_store("dsA/part-00000".to_string(), g);
+        assert!(partition_cache_lookup("dsA/part-00000", "dsA").is_some());
+        // A lookup under a different dataset prefix evicts the stale entry.
+        assert!(partition_cache_lookup("dsB/part-00000", "dsB").is_none());
+        assert!(partition_cache_lookup("dsA/part-00000", "dsA").is_none());
+    }
+
+    #[test]
     fn build_csr_graph_empty_edges() {
         let g = build_csr_graph(3, vec![]);
         assert!(g.owned_nodes.is_empty());
@@ -909,6 +970,7 @@ mod tests {
             partitions: 2,
             granularity: 1,
             group_id: None,
+            use_cache: Some(false),
             timeout_seconds: None,
         }
     }
@@ -966,10 +1028,10 @@ mod tests {
         let params1 = params;
 
         let thread0 = thread::spawn(move || {
-            run_sssp_core(&params0, &handle0, worker0_graph, vec![timestamp("ws")])
+            run_sssp_core(&params0, &handle0, &worker0_graph, vec![timestamp("ws")])
         });
         let thread1 = thread::spawn(move || {
-            run_sssp_core(&params1, &handle1, worker1_graph, vec![timestamp("ws")])
+            run_sssp_core(&params1, &handle1, &worker1_graph, vec![timestamp("ws")])
         });
         let (_, b0, e0, r0) = thread0.join().unwrap();
         let (_, b1, e1, r1) = thread1.join().unwrap();

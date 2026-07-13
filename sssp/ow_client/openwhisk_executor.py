@@ -65,9 +65,14 @@ class OpenwhiskExecutor:
     def burst(self, action_name, params_list, file, is_zip=False, memory=256, debug_mode=False, custom_image=None,
               backend="rabbitmq",
               granularity=None, chunk_size=None, join=False, timeout=900000,
-              completion_timeout=None) -> ResultDataset:
+              completion_timeout=None, register_action=True) -> ResultDataset:
         dataset = ResultDataset()
-        self.__create_action(action_name, file, is_zip, memory, custom_image, timeout)
+        # Re-registering the action (PUT ?overwrite=true) bumps its revision and
+        # makes OpenWhisk discard every warm container for it, forcing a cold
+        # start on the next burst. Warm-pool measurements must therefore skip
+        # registration after the first (cold) shot of a cell.
+        if register_action:
+            self.__create_action(action_name, file, is_zip, memory, custom_image, timeout)
         activation_ids = self.__invoke_burst_actions(action_name, params_list, granularity, backend, chunk_size, join,
                                                      debug_mode)
         for index, activation_id in enumerate(activation_ids):

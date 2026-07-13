@@ -38,9 +38,12 @@ pub fn run_bellman_ford_rayon(
     let mut prev = vec![INFINITY; n];
 
     for _ in 0..max_iterations {
-        for (slot, atomic) in prev.iter_mut().zip(dist.iter()) {
-            *slot = f32::from_bits(atomic.load(Ordering::Relaxed));
-        }
+        // Snapshot the previous-iteration distances in parallel.
+        prev.par_iter_mut()
+            .zip(dist.par_iter())
+            .for_each(|(slot, atomic)| {
+                *slot = f32::from_bits(atomic.load(Ordering::Relaxed));
+            });
 
         let changed = AtomicU64::new(0);
         (0..csr.num_nodes).into_par_iter().for_each(|u| {
@@ -59,6 +62,13 @@ pub fn run_bellman_ford_rayon(
                     continue;
                 }
                 let cand_bits = candidate.to_bits();
+                // Cheap relaxed load first: skip the expensive atomic RMW
+                // (lock cmpxchg on x86 — there is no native atomic-min) when
+                // the candidate cannot improve the current distance, which is
+                // the common case after the first few Bellman-Ford iterations.
+                if cand_bits >= dist[vidx].load(Ordering::Relaxed) {
+                    continue;
+                }
                 let prev_bits = dist[vidx].fetch_min(cand_bits, Ordering::Relaxed);
                 if cand_bits < prev_bits {
                     changed.fetch_add(1, Ordering::Relaxed);

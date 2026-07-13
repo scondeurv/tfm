@@ -1,0 +1,6 @@
+# Test-only dependencies for the correctness-validation suite (oracle + property-based).
+# Installed into tests/.venv-test; NOT runtime deps of any algorithm.
+networkx>=3.0
+hypothesis>=6.0
+numpy>=1.26
+scipy>=1.11

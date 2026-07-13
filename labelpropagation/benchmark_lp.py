@@ -254,6 +254,7 @@ def benchmark_burst(
     backend="redis-list",
     chunk_size=1024,
     ow_protocol="https",
+    register_action=True,
 ):
     """Run burst Label Propagation and return (host_total_ms, warm_total_ms, span_ms)."""
     s3_prefix = f"{key_prefix}/large-{num_nodes}"
@@ -286,7 +287,8 @@ def benchmark_burst(
             backend=backend,
             chunk_size=chunk_size,
             is_zip=True,
-            timeout=burst_timeout_ms
+            timeout=burst_timeout_ms,
+            register_action=register_action,
         )
         finished = get_millis()
         
@@ -466,6 +468,11 @@ if __name__ == "__main__":
             "OpenWhisk pool can serve the request from a warm container."
         ),
     )
+    parser.add_argument(
+        "--skip-action-update",
+        action="store_true",
+        help="Do not re-register the OpenWhisk action before invoking. Keeps warm containers valid (re-registration bumps the action revision and invalidates the warm pool).",
+    )
     parser.add_argument("--run-rayon", action="store_true", help="Also run Rayon backend")
     parser.add_argument("--rayon-threads", type=int, default=None, help="Rayon thread count (default: rayon's own choice)")
     parser.add_argument("--run-mpi", action="store_true", help="Also run MPI backend")
@@ -528,6 +535,7 @@ if __name__ == "__main__":
             args.backend,
             args.chunk_size,
             args.ow_protocol,
+            register_action=not args.skip_action_update,
         )
         if burst_host_time is not None:
             print(f"Burst Time (Host Total / Cold): {burst_host_time} ms")

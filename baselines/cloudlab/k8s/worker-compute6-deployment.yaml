@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spark-worker-compute6
+  namespace: __NAMESPACE__
+spec:
+  replicas: __WORKER_COMPUTE6_REPLICAS__
+  selector:
+    matchLabels:
+      app: spark-worker-compute6
+  template:
+    metadata:
+      labels:
+        app: spark-worker-compute6
+    spec:
+      enableServiceLinks: false
+      nodeSelector:
+        kubernetes.io/hostname: compute5
+      initContainers:
+        - name: s3a-jars
+          image: curlimages/curl:8.7.1
+          command:
+            - sh
+            - -ceu
+            - |
+              curl -fsSL -o /opt/spark/extra-jars/hadoop-aws-3.3.4.jar \
+                https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar
+              curl -fsSL -o /opt/spark/extra-jars/aws-java-sdk-bundle-1.12.262.jar \
+                https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar
+          volumeMounts:
+            - name: spark-extra-jars
+              mountPath: /opt/spark/extra-jars
+      containers:
+        - name: spark-worker
+          image: __SPARK_IMAGE__
+          imagePullPolicy: IfNotPresent
+          command:
+            - /opt/spark/bin/spark-class
+            - org.apache.spark.deploy.worker.Worker
+            - spark://spark-master:7077
+            - --cores
+            - "__WORKER_CORES__"
+            - --memory
+            - __WORKER_MEMORY__
+          env:
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: spark-minio-creds
+                  key: AWS_ACCESS_KEY_ID
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: spark-minio-creds
+                  key: AWS_SECRET_ACCESS_KEY
+            - name: SPARK_CLASSPATH
+              value: /opt/spark/extra-jars/*
+          resources:
+            requests:
+              cpu: "__WORKER_REQUEST_CPU__"
+              memory: __WORKER_REQUEST_MEMORY__
+            limits:
+              cpu: "__WORKER_LIMIT_CPU__"
+              memory: __WORKER_LIMIT_MEMORY__
+          volumeMounts:
+            - name: spark-extra-jars
+              mountPath: /opt/spark/extra-jars
+      volumes:
+        - name: spark-extra-jars
+          emptyDir: {}

@@ -123,6 +123,37 @@ pub fn majority_label(counts: &HashMap<u32, usize>, current: u32) -> u32 {
     best
 }
 
+/// Most-frequent label among the neighbour labels collected in `scratch`
+/// (UNKNOWN entries must already be excluded by the caller), with ties broken
+/// towards the smallest label. `scratch` is sorted in place. This is the
+/// allocation- and hash-free equivalent of [`majority_label`]: scanning the
+/// sorted runs in ascending label order and only replacing the best on a
+/// strictly-greater count reproduces the "largest count, smallest label on a
+/// tie" semantics exactly. Returns `current` when `scratch` is empty.
+pub fn majority_label_sorted(scratch: &mut [u32], current: u32) -> u32 {
+    if scratch.is_empty() {
+        return current;
+    }
+    scratch.sort_unstable();
+    let mut best = current;
+    let mut best_count = 0usize;
+    let mut i = 0;
+    while i < scratch.len() {
+        let label = scratch[i];
+        let mut j = i + 1;
+        while j < scratch.len() && scratch[j] == label {
+            j += 1;
+        }
+        let count = j - i;
+        if count > best_count {
+            best = label;
+            best_count = count;
+        }
+        i = j;
+    }
+    best
+}
+
 /// Initialize label vector with semi-supervised seeds (or self-id in unsupervised mode).
 pub fn init_labels(num_nodes: u32, initial_labels: &HashMap<u32, u32>) -> Vec<u32> {
     let mut labels = vec![UNKNOWN; num_nodes as usize];
@@ -153,7 +184,7 @@ pub fn run_lp_csr(
     let unsupervised_mode = initial_labels.is_empty();
 
     let mut prev_labels = vec![UNKNOWN; num_nodes as usize];
-    let mut counts: HashMap<u32, usize> = HashMap::new();
+    let mut scratch: Vec<u32> = Vec::new();
 
     for _ in 0..max_iter {
         prev_labels.copy_from_slice(&labels);
@@ -166,15 +197,15 @@ pub fn run_lp_csr(
 
             let current_label = prev_labels[i as usize];
 
-            counts.clear();
+            scratch.clear();
             for &neighbor in csr.neighbors(i) {
                 let l = prev_labels[neighbor as usize];
                 if l != UNKNOWN {
-                    *counts.entry(l).or_insert(0) += 1;
+                    scratch.push(l);
                 }
             }
 
-            let new_label = majority_label(&counts, current_label);
+            let new_label = majority_label_sorted(&mut scratch, current_label);
 
             if new_label != current_label {
                 labels[i as usize] = new_label;

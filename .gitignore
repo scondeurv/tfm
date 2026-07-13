@@ -49,3 +49,11 @@ kubeconfig*
 # IDEs
 .idea/
 .vscode/
+
+# Spark baseline data/results (regenerable)
+baselines/data/
+baselines/results/
+
+# Build artifacts (OpenWhisk/Burst action packages, compiled binaries)
+*.zip
+*.bak

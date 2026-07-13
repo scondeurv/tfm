@@ -37,6 +37,7 @@ echo "   Middleware dir:  $MIDDLEWARE_DIR"
 docker run --rm --entrypoint="" \
     -v "$ACTION_DIR":/tmp/input_actions \
     -v "$MIDDLEWARE_DIR":/tmp/input_middleware \
+    -v "$SCRIPT_DIR/pagerank-core":/tmp/input_pagerank_core \
     "$IMAGE" \
     /bin/bash -c "
         set -euo pipefail
@@ -44,6 +45,11 @@ docker run --rm --entrypoint="" \
         cp -r /tmp/input_middleware /tmp/middleware_src
         rm -rf /usr/src/burst-communication-middleware
         mv /tmp/middleware_src /usr/src/burst-communication-middleware
+        # ow-pagerank's equivalence test depends on the sibling pagerank-core
+        # crate; cargo resolves its manifest even for a release build, so the
+        # crate must exist next to /usr/src/actions inside the image.
+        rm -rf /usr/src/pagerank-core
+        cp -r /tmp/input_pagerank_core /usr/src/pagerank-core
         python3 /usr/bin/compile.py main /tmp/actions_src /tmp
         if [ ! -f /tmp/exec ]; then
             echo '❌ compile.py finished without producing /tmp/exec'

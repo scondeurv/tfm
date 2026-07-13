@@ -39,3 +39,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "harness"
 path = "src/harness.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -12,7 +12,7 @@
 //! Acceptable for the TFM COST experiment up to n ~ 10M (≈ 0.5 GB CSR per
 //! rank). For n > 10M a partitioned-graph variant is needed.
 
-use label_propagation::{majority_label, CsrGraph, UNKNOWN, init_labels};
+use label_propagation::{majority_label_sorted, CsrGraph, UNKNOWN, init_labels};
 use mpi::collective::SystemOperation;
 use mpi::traits::*;
 use std::collections::HashMap;
@@ -60,7 +60,12 @@ pub fn run_lp_mpi<C: Communicator>(
         }
         let mut local_changed: u64 = 0;
 
-        let mut counts: HashMap<u32, usize> = HashMap::new();
+        // Reusable scratch vector for neighbour-label collection. Cleared (not
+        // dropped) between vertices: `Vec::clear` is O(len), not O(capacity),
+        // unlike the HashMap pattern this replaces — which paid an O(capacity)
+        // clear retained at the high-water mark set by the highest-degree hub
+        // in the owned range. Equivalent semantics via `majority_label_sorted`.
+        let mut scratch: Vec<u32> = Vec::new();
         for i in start..end {
             // Seed clamping — owners propose the seed value, never recompute.
             if !unsupervised_mode {
@@ -71,14 +76,14 @@ pub fn run_lp_mpi<C: Communicator>(
             }
 
             let current_label = prev_labels[i as usize];
-            counts.clear();
+            scratch.clear();
             for &neighbor in csr.neighbors(i) {
                 let l = prev_labels[neighbor as usize];
                 if l != UNKNOWN {
-                    *counts.entry(l).or_insert(0) += 1;
+                    scratch.push(l);
                 }
             }
-            let new_label = majority_label(&counts, current_label);
+            let new_label = majority_label_sorted(&mut scratch, current_label);
             proposed[i as usize] = new_label;
             if new_label != current_label {
                 local_changed += 1;

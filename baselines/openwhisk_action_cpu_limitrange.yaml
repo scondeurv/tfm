@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: openwhisk-action-default-cpu
+  namespace: openwhisk
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: "1"
+      default:
+        cpu: "1"
+

@@ -81,7 +81,7 @@ def _upload_partitions(
         config=Config(signature_version="s3v4"),
     )
     for shard, rows in shards.items():
-        key = f"{prefix}/partition-{shard:04d}.tsv"
+        key = f"{prefix}/part-{shard:05d}"
         body = "\n".join(rows) + "\n"
         s3.put_object(Bucket=bucket, Key=key, Body=body.encode("utf-8"))
         print(f"  uploaded {key}  ({len(rows):,} edges)")

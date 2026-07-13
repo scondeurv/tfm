@@ -98,10 +98,38 @@ def edges_to_tsv_weighted(edges: Iterable[tuple[int, int]], seed: int = 7) -> st
     return "".join(out)
 
 
+def complete_graph(n: int = 8) -> tuple[list[tuple[int, int]], int]:
+    """Complete directed graph K_n (all u->v, u!=v). Dense, every node reachable."""
+    return [(u, v) for u in range(n) for v in range(n) if u != v], n
+
+
+def directed_cycle(n: int = 50) -> tuple[list[tuple[int, int]], int]:
+    """Single directed cycle 0->1->...->n-1->0. BFS depth = n-1; PR uniform."""
+    return [(i, (i + 1) % n) for i in range(n)], n
+
+
+def layered_dag(layers: int = 6, width: int = 5) -> tuple[list[tuple[int, int]], int]:
+    """Layered DAG: every node in layer L points to every node in layer L+1.
+    No cycles; tests topological reachability for BFS/SSSP/PR."""
+    n = layers * width
+    edges: list[tuple[int, int]] = []
+    for L in range(layers - 1):
+        for a in range(width):
+            for b in range(width):
+                edges.append((L * width + a, (L + 1) * width + b))
+    return edges, n
+
+
 FIXTURES: dict[str, callable] = {
     "path_100": lambda: path_graph(100),
     "star_50": lambda: star_with_sinks(50),
     "two_components_50each": lambda: two_components(50),
     "er_1000_p01": lambda: er_random(1000, 0.01, seed=42),
     "self_loops_20": lambda: self_loops_and_multi(20),
+    # --- extended coverage (edge-case topologies + seeds) ---
+    "complete_8": lambda: complete_graph(8),
+    "cycle_50": lambda: directed_cycle(50),
+    "layered_dag_6x5": lambda: layered_dag(6, 5),
+    "er_500_p05": lambda: er_random(500, 0.05, seed=7),
+    "er_1000_p01_seed99": lambda: er_random(1000, 0.01, seed=99),
 }

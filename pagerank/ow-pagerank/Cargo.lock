@@ -19,6 +19,7 @@ dependencies = [
  "futures",
  "http 0.2.12",
  "log",
+ "pagerank-core",
  "serde",
  "serde_derive",
  "serde_json",
@@ -2504,6 +2505,14 @@ dependencies = [
  "elliptic-curve",
  "primeorder",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "pagerank-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

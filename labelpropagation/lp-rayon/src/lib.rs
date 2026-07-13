@@ -5,7 +5,7 @@
 //! updates that are then applied serially. `prev_labels` and the CSR are
 //! shared read-only across threads — no synchronisation needed.
 
-use label_propagation::{majority_label, CsrGraph, UNKNOWN, init_labels};
+use label_propagation::{majority_label_sorted, CsrGraph, UNKNOWN, init_labels};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
@@ -37,15 +37,19 @@ pub fn run_lp_rayon(
                     return None;
                 }
 
-                let mut counts: HashMap<u32, usize> = HashMap::new();
+                // Hash-free majority vote: collect non-UNKNOWN neighbour labels
+                // into a scratch buffer and reuse `majority_label_sorted`, matching
+                // the standalone (`lpst`) and MPI (`lp-mpi`) kernels exactly so the
+                // three native paradigms share one comparable per-node cost.
+                let mut scratch: Vec<u32> = Vec::with_capacity(neighbors.len());
                 for &neighbor in neighbors {
                     let l = prev_labels[neighbor as usize];
                     if l != UNKNOWN {
-                        *counts.entry(l).or_insert(0) += 1;
+                        scratch.push(l);
                     }
                 }
 
-                let new_label = majority_label(&counts, current_label);
+                let new_label = majority_label_sorted(&mut scratch, current_label);
                 if new_label != current_label {
                     Some((i, new_label))
                 } else {

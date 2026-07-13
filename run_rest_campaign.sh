@@ -4,7 +4,7 @@
 # preflight gate + cleanup + per-cell skip + health scan are built into the
 # orchestrator, so it runs to completion unattended and records any failed cells.
 set -uo pipefail
-cd /home/sergio/src
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 export CAMPAIGN_ROOT="${CAMPAIGN_ROOT:-experiment_data/cloudlab_campaigns/campaign-unified-20260606T164415Z}"
 export OW_HOST="${OW_HOST:-10.99.125.88}"

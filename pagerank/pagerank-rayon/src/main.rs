@@ -2,20 +2,18 @@
 //!
 //! CLI: `pagerank-rayon <graph_file> <num_nodes> <max_iter> [threads]`
 //!
-//! Parallelism strategy: pull-style update. For each iteration, we precompute
-//! `contrib[i] = rank[i] / out_degree[i]` (or 0 for dangling), then update
-//! `next[j]` for every vertex `j` by accumulating contributions from incoming
-//! neighbours. To avoid building the reverse graph, we use the same CSR but
-//! drive the inner aggregation across destination vertices in parallel by
-//! pre-binning contributions via an atomic-free scatter using thread-local
-//! buffers reduced at the end of each iteration.
-//!
-//! For simplicity in this scaffold, we fall back to a sequential `contribute`
-//! step but parallelise the teleport+damping fold across vertices (where most
-//! of the FLOPs land for sparse-but-large graphs).
+//! Parallelism strategy: pull-style update over a transposed CSR. Each
+//! iteration (1) precomputes `contrib[u] = rank[u] / out_degree[u]` (0 for
+//! dangling) in parallel, then (2) computes `next[v]` for every destination
+//! `v` in parallel by summing `contrib[u]` over its in-neighbours `u`. Because
+//! every destination owns its own `next[v]` slot, the scatter is contention-
+//! free: no atomics, no thread-local reduction. The transpose is built once,
+//! amortised over all iterations. This is the standard high-performance
+//! shared-memory PageRank formulation; it replaces the earlier scaffold whose
+//! `contribute` step ran serially and therefore never scaled.
 
 use pagerank_core::{
-    build_csr, load_edges, power_iter_contribute, DEFAULT_DAMPING, DEFAULT_TOLERANCE,
+    build_csr, build_csr_transpose, load_edges, DEFAULT_DAMPING, DEFAULT_TOLERANCE,
 };
 use rayon::prelude::*;
 use std::env;
@@ -28,20 +26,45 @@ fn run_pagerank_rayon(
     tolerance: f32,
 ) -> (Vec<f32>, u32) {
     let n = csr.num_nodes as usize;
+    let transpose = build_csr_transpose(csr);
     let mut rank = vec![1.0f32 / n as f32; n];
+    let mut contrib = vec![0.0f32; n];
     let mut next = vec![0.0f32; n];
     let teleport_base = (1.0 - damping) / n as f32;
     for it in 0..max_iter {
-        next.par_iter_mut().for_each(|x| *x = 0.0);
-        let dangling = power_iter_contribute(csr, &rank, &mut next);
+        // (1) parallel precompute of per-source contribution + dangling mass.
+        let dangling: f32 = contrib
+            .par_iter_mut()
+            .enumerate()
+            .map(|(u, c)| {
+                let deg = csr.out_degree[u];
+                if deg == 0 {
+                    *c = 0.0;
+                    rank[u]
+                } else {
+                    *c = rank[u] / deg as f32;
+                    0.0
+                }
+            })
+            .sum();
         let dangling_per_node = dangling / n as f32;
+        // (2) parallel pull: each destination sums its in-neighbours' contrib.
+        next.par_iter_mut().enumerate().for_each(|(v, nv)| {
+            let start = transpose.in_offsets[v] as usize;
+            let end = transpose.in_offsets[v + 1] as usize;
+            let mut acc = 0.0f32;
+            for k in start..end {
+                acc += contrib[transpose.in_neighbors[k] as usize];
+            }
+            *nv = teleport_base + damping * (acc + dangling_per_node);
+        });
+        // (3) parallel commit + L1 delta.
         let delta: f32 = rank
             .par_iter_mut()
             .zip(next.par_iter())
             .map(|(r, &n_v)| {
-                let new_v = teleport_base + damping * (n_v + dangling_per_node);
-                let d = (new_v - *r).abs();
-                *r = new_v;
+                let d = (n_v - *r).abs();
+                *r = n_v;
                 d
             })
             .sum();

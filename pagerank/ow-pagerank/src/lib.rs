@@ -34,11 +34,16 @@
 //!
 //! # Dangling nodes
 //!
-//! The distributed action **does not** redistribute dangling-node mass.
-//! Synthetic datasets have no dangling vertices by construction; SNAP
-//! datasets typically have a small fraction (~0.1–1%) of dangling
-//! vertices, which slightly perturbs the converged rank vector but does
-//! not invalidate cross-backend timing comparisons.
+//! Dangling-node mass **is** redistributed uniformly, matching the
+//! `standalone`, `rayon`, and `mpi` backends. A vertex is globally
+//! dangling iff no worker owns an out-edge for it, so ownership alone
+//! cannot detect it (no worker owns a dangling vertex). Instead, a
+//! one-time presence reduce at startup identifies the global dangling
+//! set; thereafter — because every worker holds the identical full
+//! `rank` vector after each broadcast — each worker computes the global
+//! dangling mass locally, with **zero** extra per-iteration
+//! communication. This reproduces the value MPI obtains via a
+//! per-iteration `Allreduce(SUM)`.
 //!
 //! # Wire format
 //!
@@ -51,6 +56,7 @@
 
 use std::{
     fmt::Write as _,
+    sync::{Arc, Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -87,6 +93,11 @@ struct Input {
     #[serde(default)]
     group_id: Option<u32>,
     timeout_seconds: Option<u64>,
+    /// Enable the in-memory burst-local partition cache (defaults to `true`).
+    /// Set to `false` to force the S3 fetch + parse + CSR build on every
+    /// invocation, reproducing the un-cached deployment behaviour.
+    #[serde(default)]
+    use_cache: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -217,6 +228,30 @@ fn build_csr_graph(num_nodes: u32, mut edges: Vec<(u32, u32)>) -> CSRGraph {
     CSRGraph { owned_nodes, offsets, flat_neighbors }
 }
 
+/// Cross-invocation, burst-local partition cache (the in-memory cache
+/// proposed by the Burst Computing paper). The ActionLoop runtime keeps
+/// this process alive across warm invocations, so a warm burst that
+/// re-requests the same partition skips the S3 fetch + parse + CSR build
+/// entirely. Keyed by `{key}/part-{worker:05}`; all workers of the pack
+/// share the map (they run as threads of this process). Entries whose key
+/// does not start with the current dataset prefix are evicted on lookup,
+/// so a size sweep cannot accumulate CSRs beyond the container memory
+/// limit.
+static PARTITION_CACHE: OnceLock<Mutex<std::collections::HashMap<String, Arc<CSRGraph>>>> =
+    OnceLock::new();
+
+fn partition_cache_lookup(part_key: &str, dataset_prefix: &str) -> Option<Arc<CSRGraph>> {
+    let cache = PARTITION_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut map = cache.lock().unwrap();
+    map.retain(|k, _| k.starts_with(dataset_prefix));
+    map.get(part_key).cloned()
+}
+
+fn partition_cache_store(part_key: String, graph: Arc<CSRGraph>) {
+    let cache = PARTITION_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    cache.lock().unwrap().insert(part_key, graph);
+}
+
 async fn load_partition_flat(
     params: &Input,
     s3_client: &S3Client,
@@ -268,6 +303,56 @@ fn merge_contribs(mut left: ContribMessage, right: ContribMessage) -> ContribMes
     left
 }
 
+/// Scatter the rank of every locally-owned source vertex to its
+/// out-neighbours, accumulating per-destination partial contributions.
+/// Returns a `Vec<f32>` of length `n` (one slot per node). Pure: depends
+/// only on the local partition and the current rank, so it is unit
+/// testable without the middleware.
+fn scatter_local(graph: &CSRGraph, rank: &[f32], n: usize) -> Vec<f32> {
+    let mut contrib = vec![0.0f32; n];
+    for &u in &graph.owned_nodes {
+        let uidx = u as usize;
+        let start = graph.offsets[uidx] as usize;
+        let end = graph.offsets[uidx + 1] as usize;
+        let deg = (end - start) as u32;
+        if deg == 0 {
+            continue;
+        }
+        let share = rank[uidx] / deg as f32;
+        for k in start..end {
+            let v = graph.flat_neighbors[k] as usize;
+            if v < n {
+                contrib[v] += share;
+            }
+        }
+    }
+    contrib
+}
+
+/// Apply the teleport + damping + dangling-redistribution update in place,
+/// returning the L1 delta `Σ|rank_new - rank_old|`. `global_contrib` is the
+/// fleet-summed per-node contribution; `dangling_nodes` is the globally
+/// dangling set (computed once). Pure and middleware-free, so the exact
+/// production update is exercised directly by tests.
+fn apply_pagerank_update(
+    rank: &mut [f32],
+    global_contrib: &[f32],
+    dangling_nodes: &[u32],
+    teleport_base: f32,
+    damping: f32,
+) -> f32 {
+    let n = rank.len();
+    let dangling_mass: f32 = dangling_nodes.iter().map(|&i| rank[i as usize]).sum();
+    let dangling_per_node = dangling_mass / n as f32;
+    let mut delta = 0.0f32;
+    for i in 0..n {
+        let new_v = teleport_base + damping * (global_contrib[i] + dangling_per_node);
+        delta += (new_v - rank[i]).abs();
+        rank[i] = new_v;
+    }
+    delta
+}
+
 fn build_results_report(
     rank: &[f32],
     num_nodes: u32,
@@ -310,7 +395,7 @@ fn build_results_report(
 fn run_pagerank_core(
     params: &Input,
     middleware: &MiddlewareActorHandle<ContribMessage>,
-    graph: CSRGraph,
+    graph: &CSRGraph,
     mut timestamps: Vec<Timestamp>,
 ) -> (Vec<Timestamp>, Vec<f32>, u32, bool) {
     let worker = middleware.info.worker_id;
@@ -341,29 +426,43 @@ fn run_pagerank_core(
     let mut executed_iters: u32 = 0;
     let mut converged = false;
 
+    // Identify globally-dangling vertices (out-degree 0 across the whole
+    // fleet). A vertex is owned by a worker iff that worker holds one of
+    // its out-edges, so a dangling vertex is owned by nobody and cannot be
+    // detected locally. Each worker marks its owned sources as f32 1.0;
+    // the fleet-wide sum (reusing `merge_contribs`) is > 0 exactly for
+    // vertices that have at least one out-edge somewhere. This collective
+    // runs once; the resulting set is static for the whole computation.
+    let dangling_nodes: Vec<u32> = {
+        let mut presence = vec![0u32; n + 1];
+        for &u in &graph.owned_nodes {
+            presence[u as usize] = 1.0f32.to_bits();
+        }
+        presence[n] = 1;
+        let reduced = middleware
+            .reduce(ContribMessage(presence), merge_contribs)
+            .unwrap();
+        let global = middleware.broadcast(reduced, ROOT_WORKER).unwrap();
+        (0..n as u32)
+            .filter(|&i| f32::from_bits(global.0[i as usize]) == 0.0)
+            .collect()
+    };
+    if worker == ROOT_WORKER {
+        println!(
+            "[Worker {worker}] {} globally-dangling vertices of {n}",
+            dangling_nodes.len()
+        );
+    }
+
     while executed_iters < max_iter {
         timestamps.push(timestamp(&format!("iter_{executed_iters}_start")));
 
-        // Layout: n contribution slots + 1 diagnostic counter slot.
-        let extended_size = n + 1;
-        let mut local_msg = vec![0u32; extended_size];
-
-        for &u in &graph.owned_nodes {
-            let uidx = u as usize;
-            let start = graph.offsets[uidx] as usize;
-            let end = graph.offsets[uidx + 1] as usize;
-            let deg = (end - start) as u32;
-            if deg == 0 {
-                continue;
-            }
-            let share = rank[uidx] / deg as f32;
-            for k in start..end {
-                let v = graph.flat_neighbors[k] as usize;
-                if v < n {
-                    let prev = f32::from_bits(local_msg[v]);
-                    local_msg[v] = (prev + share).to_bits();
-                }
-            }
+        // Local scatter → f32 contribution per node, packed into the wire
+        // layout (n contribution slots + 1 diagnostic counter slot).
+        let local_contrib = scatter_local(&graph, &rank, n);
+        let mut local_msg = vec![0u32; n + 1];
+        for (slot, &c) in local_msg.iter_mut().take(n).zip(local_contrib.iter()) {
+            *slot = c.to_bits();
         }
         local_msg[n] = 1; // diagnostic: number of contributing workers
 
@@ -377,16 +476,20 @@ fn run_pagerank_core(
         let global = middleware.broadcast(reduced, ROOT_WORKER).unwrap();
         timestamps.push(timestamp(&format!("iter_{executed_iters}_broadcast")));
 
-        // Apply teleport + damping identically on all workers. The same
-        // input (`global`) → same output, so no extra reduction is
-        // needed for the delta computed below.
-        let mut delta = 0.0f32;
-        for i in 0..n {
-            let contrib = f32::from_bits(global.0[i]);
-            let new_v = teleport_base + damping * contrib;
-            delta += (new_v - rank[i]).abs();
-            rank[i] = new_v;
-        }
+        // Decode the fleet-summed contributions, then apply teleport +
+        // damping + dangling redistribution. The dangling mass is computed
+        // locally: every worker holds the identical `rank` vector (same
+        // input → same update), so the sum is bit-identical fleet-wide and
+        // needs no communication.
+        let global_contrib: Vec<f32> =
+            (0..n).map(|i| f32::from_bits(global.0[i])).collect();
+        let delta = apply_pagerank_update(
+            &mut rank,
+            &global_contrib,
+            &dangling_nodes,
+            teleport_base,
+            damping,
+        );
         executed_iters += 1;
 
         if worker == ROOT_WORKER {
@@ -436,14 +539,35 @@ fn pagerank(params: Input, middleware: &MiddlewareActorHandle<ContribMessage>) -
         .unwrap();
 
     timestamps.push(timestamp("get_input"));
-    let graph = rt
-        .block_on(load_partition_flat(&params, &s3_client, worker))
-        .unwrap_or_else(|err| panic!("{err}"));
+    let use_cache = params.use_cache.unwrap_or(true);
+    let part_key = format!("{}/part-{:05}", params.input_data.key, worker);
+    let cached = if use_cache {
+        partition_cache_lookup(&part_key, &params.input_data.key)
+    } else {
+        None
+    };
+    let graph: Arc<CSRGraph> = match cached {
+        Some(g) => {
+            println!("[Worker {worker}] partition cache HIT for {part_key}");
+            timestamps.push(timestamp("get_input_cache_hit"));
+            g
+        }
+        None => {
+            let g = Arc::new(
+                rt.block_on(load_partition_flat(&params, &s3_client, worker))
+                    .unwrap_or_else(|err| panic!("{err}")),
+            );
+            if use_cache {
+                partition_cache_store(part_key, g.clone());
+            }
+            g
+        }
+    };
     timestamps.push(timestamp("get_input_end"));
 
     let damping = params.damping.unwrap_or(DEFAULT_DAMPING);
     let (mut timestamps, rank, executed_iters, converged) =
-        run_pagerank_core(&params, middleware, graph, timestamps);
+        run_pagerank_core(&params, middleware, &graph, timestamps);
 
     let results_report = if worker == ROOT_WORKER {
         timestamps.push(timestamp("write_output_start"));
@@ -570,6 +694,76 @@ mod tests {
         let mut edges = Vec::new();
         parse_partition_body(0, "p", body, 4, &mut edges);
         assert_eq!(edges, vec![(0, 1), (2, 0)]);
+    }
+
+    /// End-to-end numeric equivalence: a single-worker burst run (where
+    /// `reduce`/`broadcast` are the identity, so the collectives drop out)
+    /// must reproduce the canonical `pagerank-core` serial kernel bit-for-bit
+    /// on a graph that contains a dangling vertex. This exercises the real
+    /// production helpers (`scatter_local`, `apply_pagerank_update`) and
+    /// proves dangling mass is redistributed (sum of ranks stays ~1.0).
+    #[test]
+    fn dangling_redistribution_matches_core() {
+        // 0→1→2→0 cycle, plus 0→3 and 1→3; vertex 3 is dangling (no out-edges).
+        let edges = vec![(0u32, 1u32), (1, 2), (2, 0), (0, 3), (1, 3)];
+        let num_nodes = 4u32;
+        let n = num_nodes as usize;
+        let damping = DEFAULT_DAMPING;
+        let tolerance = DEFAULT_TOLERANCE;
+        let max_iter = MAX_ITERATIONS;
+        let n_f = num_nodes as f32;
+        let teleport_base = (1.0 - damping) / n_f;
+
+        // --- burst path (single worker: collectives are identity) ---
+        let graph = build_csr_graph(num_nodes, edges.clone());
+        // Single-worker dangling set == complement of owned (out-edge) nodes,
+        // identical to what the fleet-wide presence reduce yields for n_w=1.
+        let dangling_nodes: Vec<u32> = (0..num_nodes)
+            .filter(|u| !graph.owned_nodes.contains(u))
+            .collect();
+        assert_eq!(dangling_nodes, vec![3], "vertex 3 must be detected dangling");
+
+        let mut rank = vec![1.0f32 / n_f; n];
+        for _ in 0..max_iter {
+            let contrib = scatter_local(&graph, &rank, n);
+            let delta = apply_pagerank_update(
+                &mut rank,
+                &contrib,
+                &dangling_nodes,
+                teleport_base,
+                damping,
+            );
+            if delta < tolerance {
+                break;
+            }
+        }
+
+        // --- reference path: canonical serial kernel ---
+        let csr = pagerank_core::build_csr(num_nodes, &edges);
+        let (ref_rank, _) = pagerank_core::run_pagerank(&csr, max_iter, damping, tolerance);
+
+        // Bit-compatible kernels → ranks agree to f32 round-off.
+        for i in 0..n {
+            assert!(
+                (rank[i] - ref_rank[i]).abs() < 1e-5,
+                "node {i}: burst {} vs core {}",
+                rank[i],
+                ref_rank[i]
+            );
+        }
+        // Dangling mass conserved: total rank stays ~1.0.
+        let sum: f32 = rank.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-3, "rank sum drifted: {sum}");
+    }
+
+    #[test]
+    fn partition_cache_hit_and_prefix_eviction() {
+        let g = Arc::new(build_csr_graph(2, vec![(0, 1)]));
+        partition_cache_store("dsA/part-00000".to_string(), g);
+        assert!(partition_cache_lookup("dsA/part-00000", "dsA").is_some());
+        // A lookup under a different dataset prefix evicts the stale entry.
+        assert!(partition_cache_lookup("dsB/part-00000", "dsB").is_none());
+        assert!(partition_cache_lookup("dsA/part-00000", "dsA").is_none());
     }
 
     #[test]

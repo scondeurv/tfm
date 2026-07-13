@@ -3,7 +3,9 @@
 //! Per-level loop: the current frontier (vertices discovered at level `L`) is
 //! processed in parallel — each thread scans its slice's neighbours and tries
 //! to claim each unvisited neighbour at level `L+1` via atomic
-//! `compare_exchange`. Only the thread that wins the race appends `v` to the
+//! `compare_exchange`. A relaxed load guards the CAS so a visited neighbour
+//! does not pay a `lock cmpxchg`; only contended unvisited neighbours hit the
+//! atomic RMW. Only the thread that wins the race appends `v` to the
 //! next-frontier accumulator, guaranteeing `levels` is set exactly once per
 //! node and the next frontier contains no duplicates.
 //!
@@ -45,6 +47,9 @@ pub fn run_bfs_rayon(csr: &CsrGraph, source: u32, max_levels: u32) -> BfsResult 
                 for &v in csr.neighbors(u) {
                     let vidx = v as usize;
                     if vidx >= n {
+                        continue;
+                    }
+                    if levels[vidx].load(Ordering::Relaxed) != UNVISITED {
                         continue;
                     }
                     if levels[vidx]

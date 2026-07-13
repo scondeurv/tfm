@@ -18,3 +18,7 @@ path = "src/main.rs"
 [[bin]]
 name = "generate-sssp-graph"
 path = "src/bin/generate_graph.rs"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
